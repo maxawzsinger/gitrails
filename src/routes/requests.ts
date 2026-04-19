@@ -1,0 +1,57 @@
+import { Router } from "express";
+import { db } from "../db.js";
+import { requireAnyKey } from "../middleware/auth.js";
+import { decrypt } from "../lib/encryption.js";
+
+export const requestsRouter = Router();
+
+requestsRouter.get("/", requireAnyKey, (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+  const offset = (page - 1) * limit;
+
+  // If authed via an agent key, scope to that key. Otherwise (principle key), show all user requests.
+  const whereClause = req.authedAgentKey
+    ? "WHERE r.agentKeyId = ?"
+    : "WHERE r.userId = ?";
+  const whereParam = req.authedAgentKey
+    ? req.authedAgentKey.agentKeyId
+    : req.authedUser!.userId;
+
+  const rows = db
+    .prepare(
+      `SELECT r.id, r.agentKeyId, r.encryptedRequest, r.encryptedResponse, r.createdAt, ak.prefix
+       FROM requests r
+       JOIN agentKeys ak ON r.agentKeyId = ak.id
+       ${whereClause}
+       ORDER BY r.createdAt DESC
+       LIMIT ? OFFSET ?`
+    )
+    .all(whereParam, limit, offset) as {
+      id: string;
+      agentKeyId: string;
+      encryptedRequest: string;
+      encryptedResponse: string;
+      createdAt: number;
+      prefix: string;
+    }[];
+
+  const total = (
+    db
+      .prepare(`SELECT COUNT(*) as count FROM requests r ${whereClause}`)
+      .get(whereParam) as { count: number }
+  ).count;
+
+  res.json({
+    page,
+    limit,
+    total,
+    requests: rows.map((r) => ({
+      id: r.id,
+      agentKeyPrefix: r.prefix,
+      request: JSON.parse(decrypt(r.encryptedRequest)),
+      response: JSON.parse(decrypt(r.encryptedResponse)),
+      createdAt: r.createdAt,
+    })),
+  });
+});

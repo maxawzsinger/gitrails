@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+dist/
+*.db
+.env
+.test.env
+about-repos.md
+/scripts
+/helpful-repos
+
+# Reference repos - not part of this project
+convex-backend/
+convex-demos/
+convex-helpers/
+gmailproxy3/
+octokit.js/
+plugin-rest-endpoint-methods.js/
