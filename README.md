@@ -155,6 +155,8 @@ curl \
 
 These files define the supported request shapes for proxied GitHub actions.
 
+Access file paths relative to this main URL: `https://github.com/maxawzsinger/gitrails/blob/main/`
+
 If you are driving this API from an AI agent, inspect these files at call time instead of loading all of them at once. Reading the entire list up front is likely to waste context:
 
 - `src/lib/endpoints/github.git.createBlob.ts`
@@ -181,4 +183,4 @@ If you are driving this API from an AI agent, inspect these files at call time i
 
 ## Self-hosting
 
-For self-hosting, this proxy uses a GitHub App to identify itself to GitHub when it makes repo API calls, and a GitHub OAuth App to identify the admin who can create and rotate the principal key. So you need to configure both: create a GitHub App with `Contents`, `Pull requests`, `Issues`, and `Metadata` permissions, install it on the target user or org repos, then create a GitHub OAuth App with callback URL ``$BASE_URL/users/oauth-flow-callback``. Set `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ENCRYPTION_KEY`, `DATABASE_PATH`, `PORT`, and `BASE_URL`; `BASE_URL` must be the public external URL, `DATABASE_PATH` should be on persistent storage, and `ENCRYPTION_KEY` must remain stable across deploys.
+For self-hosting, this proxy uses a GitHub App to identify itself to GitHub when it makes repo API calls, and a GitHub OAuth App to identify the admin who can create and rotate the principal key. So you need to configure both: create a GitHub App with `Contents`, `Pull requests`, `Issues`, and `Metadata` permissions, install it on the target user or org repos, then create a GitHub OAuth App with callback URL `$BASE_URL/users/oauth-flow-callback`. Set `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ENCRYPTION_KEY`, `DATABASE_PATH`, `PORT`, and `BASE_URL`; `BASE_URL` must be the public external URL, `DATABASE_PATH` should be on persistent storage, and `ENCRYPTION_KEY` must remain stable across deploys.

@@ -53,6 +53,25 @@
         background: #161b22;
       }
 
+      .repo-link {
+        max-width: 960px;
+        margin: 0 auto 16px;
+      }
+
+      .repo-link a {
+        display: inline-block;
+        padding: 10px 14px;
+        border: 1px solid #30363d;
+        border-radius: 999px;
+        background: #161b22;
+        color: #58a6ff;
+        text-decoration: none;
+      }
+
+      .repo-link a:hover {
+        background: #1f2630;
+      }
+
       .status[hidden] {
         display: none;
       }
@@ -76,6 +95,14 @@
   </head>
   <body>
     <main>
+      <div class="repo-link">
+        <a
+          href="https://github.com/maxawzsinger/gitrails"
+          target="_blank"
+          rel="noreferrer"
+          >Open `maxawzsinger/gitrails` on GitHub</a
+        >
+      </div>
       <section id="status" class="status">Loading README...</section>
       <article id="content" class="markdown-body" hidden></article>
     </main>
@@ -122,6 +149,18 @@
         return `https://raw.githubusercontent.com/maxawzsinger/gitrails/main/${value.replace(/^\.\//, "")}`;
       };
 
+      const rewriteRelativeUrls = (root) => {
+        for (const linkEl of root.querySelectorAll("a[href]")) {
+          linkEl.href = toGitHubUrl(linkEl.getAttribute("href"));
+          linkEl.target = "_blank";
+          linkEl.rel = "noreferrer";
+        }
+
+        for (const imageEl of root.querySelectorAll("img[src]")) {
+          imageEl.src = toImageUrl(imageEl.getAttribute("src"));
+        }
+      };
+
       marked.use({
         renderer: {
           link({ href, title, tokens }) {
@@ -148,6 +187,7 @@
 
         const markdown = await response.text();
         contentEl.innerHTML = marked.parse(markdown);
+        rewriteRelativeUrls(contentEl);
         contentEl.hidden = false;
         statusEl.hidden = true;
       } catch (error) {
