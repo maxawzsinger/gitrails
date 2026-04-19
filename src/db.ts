@@ -6,7 +6,7 @@ export const DB_SCHEMA = `
     id TEXT PRIMARY KEY,
     githubId TEXT UNIQUE NOT NULL,
     githubLogin TEXT NOT NULL,
-    principleKeyHash TEXT NOT NULL,
+    principalKeyHash TEXT NOT NULL,
     createdAt INTEGER NOT NULL
   );
 
@@ -39,6 +39,12 @@ export function initializeDb(db: DatabaseType): void {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(DB_SCHEMA);
+  const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  const hasLegacyPrincipalColumn = userColumns.some((column) => column.name === "principleKeyHash");
+  const hasPrincipalColumn = userColumns.some((column) => column.name === "principalKeyHash");
+  if (hasLegacyPrincipalColumn && !hasPrincipalColumn) {
+    db.exec("ALTER TABLE users RENAME COLUMN principleKeyHash TO principalKeyHash");
+  }
 }
 
 export const db: DatabaseType = new Database(DATABASE_PATH);

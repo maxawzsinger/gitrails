@@ -4,13 +4,13 @@ import { v4 as uuid } from "uuid";
 import { sha256 } from "../lib/crypto.js";
 import { db } from "../db.js";
 import { validatePerms } from "../lib/validatePerms.js";
-import { requireAgentKey, requirePrincipleKey } from "../middleware/auth.js";
+import { requireAgentKey, requirePrincipalKey } from "../middleware/auth.js";
 
 export const agentKeysRouter = Router();
 const AGENT_KEY_PREFIX_REGEX = /^[a-z_]+$/;
 
 // List keys for the authenticated user
-agentKeysRouter.get("/", requirePrincipleKey, (req, res) => {
+agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
   const rows = db
     .prepare(
       "SELECT id, prefix, permissions, createdAt FROM agentKeys WHERE userId = ? ORDER BY createdAt DESC",
@@ -52,7 +52,7 @@ agentKeysRouter.get("/current", requireAgentKey, (req, res) => {
   if (!row) {
     res.status(404).json({
       error: `
-      Agent key not found. If you are using a principle key,
+      Agent key not found. If you are using a principal key,
       use the /agentKeys route to list and manage keys.`,
     });
     return;
@@ -69,7 +69,7 @@ agentKeysRouter.get("/current", requireAgentKey, (req, res) => {
 });
 
 // Create a new key
-agentKeysRouter.post("/create", requirePrincipleKey, (req, res) => {
+agentKeysRouter.post("/create", requirePrincipalKey, (req, res) => {
   const { prefix } = req.body as { prefix?: string };
   if (!prefix || typeof prefix !== "string" || prefix.trim().length === 0) {
     res.status(400).json({ error: "prefix is required." });
@@ -97,7 +97,7 @@ agentKeysRouter.post("/create", requirePrincipleKey, (req, res) => {
 });
 
 // Delete a key
-agentKeysRouter.delete("/:id", requirePrincipleKey, (req, res) => {
+agentKeysRouter.delete("/:id", requirePrincipalKey, (req, res) => {
   const result = db
     .prepare("DELETE FROM agentKeys WHERE id = ? AND userId = ?")
     .run(req.params.id, req.authedUser!.userId);
@@ -126,7 +126,7 @@ Example permissions object:
   }
 }
 */
-agentKeysRouter.put("/:id/permissions", requirePrincipleKey, (req, res) => {
+agentKeysRouter.put("/:id/permissions", requirePrincipalKey, (req, res) => {
   const { permissions } = req.body as { permissions?: unknown };
 
   const keyRow = db

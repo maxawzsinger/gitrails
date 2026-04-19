@@ -11,11 +11,11 @@ This server proxies a subset of the GitHub REST API.
 It supports two credential types:
 
 - `agent key`: used to call proxied GitHub endpoints through `POST /execute`
-- `principle key`: used to manage agent keys and inspect account-level state
+- `principal key`: used to manage agent keys and inspect account-level state
 
 The OAuth bootstrap endpoint is the only endpoint that does not require authentication:
 
-- `GET /users/sign-in-with-oauth-and-rotate-principle-key`
+- `GET /users/sign-in-with-oauth-and-rotate-principal-key`
 
 Each agent key carries a `permissions` object. It allowlists:
 
@@ -26,15 +26,15 @@ Each agent key carries a `permissions` object. It allowlists:
 
 This example gives an agent read access to `foo/` and write access to `foo/bar/` only.
 
-### 1. Create or rotate a principle key
+### 1. Create or rotate a principal key
 
 Open this URL in your browser:
 
 ```text
-$BASE_URL/users/sign-in-with-oauth-and-rotate-principle-key
+$BASE_URL/users/sign-in-with-oauth-and-rotate-principal-key
 ```
 
-After the OAuth flow completes, copy the returned principle key. You will use it to create and manage agent keys.
+After the OAuth flow completes, copy the returned principal key. You will use it to create and manage agent keys.
 
 ### 2. Install the GitHub App on the target repo
 
@@ -45,7 +45,7 @@ Install the GitHub App on the repository or repositories you want this proxy to 
 ```sh
 curl \
   -X POST \
-  -H "Authorization: Bearer $PRINCIPLE_KEY" \
+  -H "Authorization: Bearer $PRINCIPAL_KEY" \
   -H "Content-Type: application/json" \
   "$BASE_URL/agentKeys/create" \
   -d '{
@@ -65,7 +65,7 @@ This example grants:
 ```sh
 curl \
   -X PUT \
-  -H "Authorization: Bearer $PRINCIPLE_KEY" \
+  -H "Authorization: Bearer $PRINCIPAL_KEY" \
   -H "Content-Type: application/json" \
   "$BASE_URL/agentKeys/<agent-key-id>/permissions" \
   -d '{
@@ -129,11 +129,11 @@ curl \
 
 ### 7. Inspect request history
 
-You can inspect request history with either a principle key or an agent key:
+You can inspect request history with either a principal key or an agent key:
 
 ```sh
 curl \
-  -H "Authorization: Bearer $PRINCIPLE_KEY" \
+  -H "Authorization: Bearer $PRINCIPAL_KEY" \
   "$BASE_URL/requests"
 ```
 
@@ -149,7 +149,7 @@ curl \
 - `src/routes/agentKeys.ts`: `GET /agentKeys` lists your agent keys; `GET /agentKeys/current` fetches the current agent key; `POST /agentKeys/create` creates an agent key; `DELETE /agentKeys/:id` deletes an agent key; `PUT /agentKeys/:id/permissions` replaces a key's permissions.
 - `src/routes/execute.ts`: `POST /execute` validates, authorizes, executes, and logs a proxied GitHub action.
 - `src/routes/requests.ts`: `GET /requests` lists logged requests and responses, scoped to the caller.
-- `src/routes/users.ts`: `GET /users/installations` lists visible GitHub App installations; `GET /users/sign-in-with-oauth-and-rotate-principle-key` starts OAuth and issues or rotates a principle key; `GET /users/oauth-flow-callback` handles OAuth callback, creates or updates the user, and returns the new principle key.
+- `src/routes/users.ts`: `GET /users/installations` lists visible GitHub App installations; `GET /users/sign-in-with-oauth-and-rotate-principal-key` starts OAuth and issues or rotates a principal key; `GET /users/oauth-flow-callback` handles OAuth callback, creates or updates the user, and returns the new principal key.
 
 ### Supported GitHub REST API endpoint definitions
 
@@ -181,4 +181,4 @@ If you are driving this API from an AI agent, inspect these files at call time i
 
 ## Self-hosting
 
-For self-hosting, this proxy uses a GitHub App to identify itself to GitHub when it makes repo API calls, and a GitHub OAuth App to identify the admin who can create and rotate the principle key. So you need to configure both: create a GitHub App with `Contents`, `Pull requests`, `Issues`, and `Metadata` permissions, install it on the target user or org repos, then create a GitHub OAuth App with callback URL ``$BASE_URL/users/oauth-flow-callback``. Set `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ENCRYPTION_KEY`, `DATABASE_PATH`, `PORT`, and `BASE_URL`; `BASE_URL` must be the public external URL, `DATABASE_PATH` should be on persistent storage, and `ENCRYPTION_KEY` must remain stable across deploys.
+For self-hosting, this proxy uses a GitHub App to identify itself to GitHub when it makes repo API calls, and a GitHub OAuth App to identify the admin who can create and rotate the principal key. So you need to configure both: create a GitHub App with `Contents`, `Pull requests`, `Issues`, and `Metadata` permissions, install it on the target user or org repos, then create a GitHub OAuth App with callback URL ``$BASE_URL/users/oauth-flow-callback``. Set `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `ENCRYPTION_KEY`, `DATABASE_PATH`, `PORT`, and `BASE_URL`; `BASE_URL` must be the public external URL, `DATABASE_PATH` should be on persistent storage, and `ENCRYPTION_KEY` must remain stable across deploys.

@@ -12,7 +12,7 @@ export type AuthedAgentKey = AuthedUser & {
   permissions: Record<string, Record<string, string>>;
 };
 
-// Resolves any valid key (principle key or agent key) to a user.
+// Resolves any valid key (principal key or agent key) to a user.
 // Attaches req.authedUser. If it's an agent key, also attaches req.authedAgentKey.
 export function requireAnyKey(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
@@ -24,15 +24,15 @@ export function requireAnyKey(req: Request, res: Response, next: NextFunction) {
 
   const hash = sha256(token);
 
-  // Check principle key first
-  const userByPrinciple = db
-    .prepare("SELECT id, githubLogin FROM users WHERE principleKeyHash = ?")
+  // Check principal key first
+  const userByPrincipal = db
+    .prepare("SELECT id, githubLogin FROM users WHERE principalKeyHash = ?")
     .get(hash) as { id: string; githubLogin: string } | undefined;
 
-  if (userByPrinciple) {
+  if (userByPrincipal) {
     req.authedUser = {
-      userId: userByPrinciple.id,
-      githubLogin: userByPrinciple.githubLogin,
+      userId: userByPrincipal.id,
+      githubLogin: userByPrincipal.githubLogin,
     };
     next();
     return;
@@ -69,17 +69,17 @@ export function requireAnyKey(req: Request, res: Response, next: NextFunction) {
     return;
   }
 
-  res.status(401).json({ error: "Invalid principle key or agent key." });
+  res.status(401).json({ error: "Invalid principal key or agent key." });
 }
 
-// Requires an agent key (not a principle key). Ensures req.authedAgentKey is set.
+// Requires an agent key (not a principal key). Ensures req.authedAgentKey is set.
 export function requireAgentKey(req: Request, res: Response, next: NextFunction) {
   requireAnyKey(req, res, () => {
     if (!req.authedAgentKey) {
       res
         .status(403)
         .json({
-          error: "This endpoint requires an agent key, not a principle key.",
+          error: "This endpoint requires an agent key, not a principal key.",
         });
       return;
     }
@@ -87,8 +87,8 @@ export function requireAgentKey(req: Request, res: Response, next: NextFunction)
   });
 }
 
-// Requires a principle key (not an agent key).
-export function requirePrincipleKey(
+// Requires a principal key (not an agent key).
+export function requirePrincipalKey(
   req: Request,
   res: Response,
   next: NextFunction,
@@ -98,7 +98,7 @@ export function requirePrincipleKey(
       res
         .status(403)
         .json({
-          error: "This endpoint requires a principle key, not an agent key.",
+          error: "This endpoint requires a principal key, not an agent key.",
         });
       return;
     }

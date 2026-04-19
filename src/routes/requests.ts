@@ -10,7 +10,7 @@ requestsRouter.get("/", requireAnyKey, (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
   const offset = (page - 1) * limit;
 
-  // If authed via an agent key, scope to that key. Otherwise (principle key), show all user requests.
+  // If authed via an agent key, scope to that key. Otherwise (principal key), show all user requests.
   const whereClause = req.authedAgentKey
     ? "WHERE r.agentKeyId = ?"
     : "WHERE r.userId = ?";

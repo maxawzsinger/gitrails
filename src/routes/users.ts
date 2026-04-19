@@ -5,14 +5,14 @@ import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, BASE_URL } from "../config.js";
 import { sha256 } from "../lib/crypto.js";
 import { app as githubApp } from "../lib/octokit.js";
 import { db } from "../db.js";
-import { requirePrincipleKey } from "../middleware/auth.js";
+import { requirePrincipalKey } from "../middleware/auth.js";
 
 export const usersRouter = Router();
 
-function renderOAuthResultPage(principleKey: string, isExistingUser: boolean): string {
+function renderOAuthResultPage(principalKey: string, isExistingUser: boolean): string {
   const message = isExistingUser
-    ? "Principle key rotated. Existing agent keys were invalidated."
-    : "Account created. Save this principle key now.";
+    ? "Principal key rotated. Existing agent keys were invalidated."
+    : "Account created. Save this principal key now.";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -50,14 +50,14 @@ function renderOAuthResultPage(principleKey: string, isExistingUser: boolean): s
     <main>
       <h1>GitHub OAuth complete</h1>
       <p>${message}</p>
-      <p>This principle key is shown once. Store it somewhere safe.</p>
-      <code>${principleKey}</code>
+      <p>This principal key is shown once. Store it somewhere safe.</p>
+      <code>${principalKey}</code>
     </main>
   </body>
 </html>`;
 }
 
-usersRouter.get("/installations", requirePrincipleKey, async (_req, res) => {
+usersRouter.get("/installations", requirePrincipalKey, async (_req, res) => {
   const installations: {
     id: number;
     account: string | undefined;
@@ -77,8 +77,8 @@ usersRouter.get("/installations", requirePrincipleKey, async (_req, res) => {
   res.json({ installations });
 });
 
-// Redirect to GitHub OAuth to create an account or issue a principle key.
-usersRouter.get("/sign-in-with-oauth-and-rotate-principle-key", (_req, res) => {
+// Redirect to GitHub OAuth to create an account or issue a principal key.
+usersRouter.get("/sign-in-with-oauth-and-rotate-principal-key", (_req, res) => {
   const params = new URLSearchParams({
     client_id: GITHUB_CLIENT_ID,
     redirect_uri: `${BASE_URL}/users/oauth-flow-callback`,
@@ -121,33 +121,33 @@ usersRouter.get("/oauth-flow-callback", async (req, res) => {
   const githubUser = (await userRes.json()) as { id: number; login: string };
 
   const githubId = String(githubUser.id);
-  const existing = db.prepare("SELECT id, principleKeyHash FROM users WHERE githubId = ?").get(githubId) as
-    | { id: string; principleKeyHash: string }
+  const existing = db.prepare("SELECT id, principalKeyHash FROM users WHERE githubId = ?").get(githubId) as
+    | { id: string; principalKeyHash: string }
     | undefined;
 
-  const principleKeyPlaintext = `pk_${crypto.randomBytes(32).toString("hex")}`;
-  const principleKeyHash = sha256(principleKeyPlaintext);
+  const principalKeyPlaintext = `pk_${crypto.randomBytes(32).toString("hex")}`;
+  const principalKeyHash = sha256(principalKeyPlaintext);
 
   if (existing) {
-    const replacePrincipleKeyAndInvalidateAgentKeys = db.transaction(() => {
-      db.prepare("UPDATE users SET githubLogin = ?, principleKeyHash = ? WHERE id = ?").run(
+    const replacePrincipalKeyAndInvalidateAgentKeys = db.transaction(() => {
+      db.prepare("UPDATE users SET githubLogin = ?, principalKeyHash = ? WHERE id = ?").run(
         githubUser.login,
-        principleKeyHash,
+        principalKeyHash,
         existing.id
       );
       db.prepare("DELETE FROM agentKeys WHERE userId = ?").run(existing.id);
     });
-    replacePrincipleKeyAndInvalidateAgentKeys();
-    res.type("html").send(renderOAuthResultPage(principleKeyPlaintext, true));
+    replacePrincipalKeyAndInvalidateAgentKeys();
+    res.type("html").send(renderOAuthResultPage(principalKeyPlaintext, true));
     return;
   }
 
-  // New user — create account + principle key
+  // New user - create account + principal key
   const userId = uuid();
 
   db.prepare(
-    "INSERT INTO users (id, githubId, githubLogin, principleKeyHash, createdAt) VALUES (?, ?, ?, ?, ?)"
-  ).run(userId, githubId, githubUser.login, principleKeyHash, Date.now());
+    "INSERT INTO users (id, githubId, githubLogin, principalKeyHash, createdAt) VALUES (?, ?, ?, ?, ?)"
+  ).run(userId, githubId, githubUser.login, principalKeyHash, Date.now());
 
-  res.type("html").send(renderOAuthResultPage(principleKeyPlaintext, false));
+  res.type("html").send(renderOAuthResultPage(principalKeyPlaintext, false));
 });

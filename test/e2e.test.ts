@@ -178,15 +178,15 @@ test(
 
     const { db } = await import("../src/db.js");
 
-    // Seed a principle key directly so the rest of the test can exercise app behavior without a real OAuth callback.
-    const principleKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
+    // Seed a principal key directly so the rest of the test can exercise app behavior without a real OAuth callback.
+    const principalKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
     db.prepare(
-      "INSERT INTO users (id, githubId, githubLogin, principleKeyHash, createdAt) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO users (id, githubId, githubLogin, principalKeyHash, createdAt) VALUES (?, ?, ?, ?, ?)",
     ).run(
       crypto.randomUUID(),
       String(githubUser.id),
       githubUser.login,
-      crypto.createHash("sha256").update(principleKey).digest("hex"),
+      crypto.createHash("sha256").update(principalKey).digest("hex"),
       Date.now(),
     );
     const { app } = await import("../src/app.js");
@@ -202,7 +202,7 @@ test(
 
       // OAuth entrypoint should redirect the browser to GitHub rather than handling auth inline.
       const redirectResponse = await request(app)
-        .get("/users/sign-in-with-oauth-and-rotate-principle-key")
+        .get("/users/sign-in-with-oauth-and-rotate-principal-key")
         .redirects(0);
       await assertStatus(redirectResponse, 302, "redirectResponse");
       assert.match(
@@ -225,13 +225,13 @@ test(
       await assertStatus(invalidKeyRequests, 401, "invalidKeyRequests");
       assert.equal(
         invalidKeyRequests.body.error,
-        "Invalid principle key or agent key.",
+        "Invalid principal key or agent key.",
       );
 
-      // A seeded principle key should see the user's GitHub App installations.
+      // A seeded principal key should see the user's GitHub App installations.
       const installationsResponse = await request(app)
         .get("/users/installations")
-        .set("Authorization", `Bearer ${principleKey}`);
+        .set("Authorization", `Bearer ${principalKey}`);
       await assertStatus(installationsResponse, 200, "installationsResponse");
       const installationsBody = installationsResponse.body as {
         installations: Array<{ account?: string }>;
@@ -243,23 +243,23 @@ test(
         `Expected GitHub App installation for ${owner}.`,
       );
 
-      // New users start with no agent keys, and principle keys cannot impersonate an agent key.
+      // New users start with no agent keys, and principal keys cannot impersonate an agent key.
       const initialKeysResponse = await request(app)
         .get("/agentKeys")
-        .set("Authorization", `Bearer ${principleKey}`);
+        .set("Authorization", `Bearer ${principalKey}`);
       await assertStatus(initialKeysResponse, 200, "initialKeysResponse");
       const initialKeysBody = initialKeysResponse.body as Array<{ id: string }>;
       assert.equal(initialKeysBody.length, 0);
 
-      const currentWithPrincipleKey = await request(app)
+      const currentWithPrincipalKey = await request(app)
         .get("/agentKeys/current")
-        .set("Authorization", `Bearer ${principleKey}`);
-      await assertStatus(currentWithPrincipleKey, 403, "currentWithPrincipleKey");
+        .set("Authorization", `Bearer ${principalKey}`);
+      await assertStatus(currentWithPrincipalKey, 403, "currentWithPrincipalKey");
 
       // Prefix validation keeps agent-key identifiers URL-safe and predictable.
       const badPrefixResponse = await request(app)
         .post("/agentKeys/create")
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
           prefix: "Bad Prefix",
         });
@@ -268,7 +268,7 @@ test(
       // Create the primary agent key that will drive the rest of the proxy exercise.
       const createdKeyResponse = await request(app)
         .post("/agentKeys/create")
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
           prefix: "e_primary",
         });
@@ -313,7 +313,7 @@ test(
 
       const invalidPermissionsResponse = await request(app)
         .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
             permissions: {
               "github.fake.missing": {},
@@ -332,7 +332,7 @@ test(
       // First prove that regex constraints are enforced before broadening permissions.
       const scopedPermissionsResponse = await request(app)
         .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
           permissions: scopedPermissions,
         });
@@ -441,7 +441,7 @@ test(
 
       const fullPermissionsResponse = await request(app)
         .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
           permissions: allPermissions,
         });
@@ -473,16 +473,16 @@ test(
       await assertStatus(validationFailureResponse, 400, "validationFailureResponse");
       assert.equal(validationFailureResponse.body.error, "Request validation failed.");
 
-      // Principle keys are management credentials, not execution credentials.
-      const executeWithPrincipleKey = await request(app)
+      // Principal keys are management credentials, not execution credentials.
+      const executeWithPrincipalKey = await request(app)
         .post("/execute")
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
           actionName: "github.repos.get",
           owner,
           repo,
         });
-      await assertStatus(executeWithPrincipleKey, 403, "executeWithPrincipleKey");
+      await assertStatus(executeWithPrincipalKey, 403, "executeWithPrincipalKey");
 
       // Read the repo through the proxy and capture the default branch for later git operations.
       const repoResponse = await request(app)
@@ -964,12 +964,12 @@ test(
       );
       await assertStatus(deletedFileResponse, 404, "deletedFileResponse");
 
-      // The principle key should see the broader request history for all agent activity.
-      const principleRequestsResponse = await request(app)
+      // The principal key should see the broader request history for all agent activity.
+      const principalRequestsResponse = await request(app)
         .get("/requests")
-        .set("Authorization", `Bearer ${principleKey}`);
-      await assertStatus(principleRequestsResponse, 200, "principleRequestsResponse");
-      const principleRequestsBody = principleRequestsResponse.body as {
+        .set("Authorization", `Bearer ${principalKey}`);
+      await assertStatus(principalRequestsResponse, 200, "principalRequestsResponse");
+      const principalRequestsBody = principalRequestsResponse.body as {
         total: number;
         requests: Array<{
           agentKeyPrefix: string;
@@ -979,7 +979,7 @@ test(
         }>;
       };
       assert(
-        principleRequestsBody.requests.some(
+        principalRequestsBody.requests.some(
           (request) => request.request.actionName === "github.pulls.merge",
         ),
       );
@@ -987,7 +987,7 @@ test(
       // Create a second key to prove request history and permissions are scoped per agent key.
       const secondKeyResponse = await request(app)
         .post("/agentKeys/create")
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
           prefix: "e_secondary",
         });
@@ -999,7 +999,7 @@ test(
 
       const secondKeyPermissionsResponse = await request(app)
         .put(`/agentKeys/${secondKeyBody.id}/permissions`)
-        .set("Authorization", `Bearer ${principleKey}`)
+        .set("Authorization", `Bearer ${principalKey}`)
         .send({
             permissions: {
               "github.repos.get": {
@@ -1051,12 +1051,12 @@ test(
       // Deletion should fail for unknown ids and revoke access for deleted keys.
       const deleteMissingKeyResponse = await request(app)
         .delete("/agentKeys/not-a-real-key")
-        .set("Authorization", `Bearer ${principleKey}`);
+        .set("Authorization", `Bearer ${principalKey}`);
       await assertStatus(deleteMissingKeyResponse, 404, "deleteMissingKeyResponse");
 
       const deleteSecondKeyResponse = await request(app)
         .delete(`/agentKeys/${secondKeyBody.id}`)
-        .set("Authorization", `Bearer ${principleKey}`);
+        .set("Authorization", `Bearer ${principalKey}`);
       await assertStatus(deleteSecondKeyResponse, 200, "deleteSecondKeyResponse");
       assert.equal(deleteSecondKeyResponse.body.ok, true);
 
