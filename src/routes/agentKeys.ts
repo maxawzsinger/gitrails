@@ -13,9 +13,9 @@ const AGENT_KEY_PREFIX_REGEX = /^[a-z_]+$/;
 agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
   const rows = db
     .prepare(
-      "SELECT id, prefix, permissions, createdAt FROM agentKeys WHERE userId = ? ORDER BY createdAt DESC",
+      "SELECT id, prefix, permissions, createdAt FROM agentKeys WHERE principalKeyId = ? ORDER BY createdAt DESC",
     )
-    .all(req.authedUser!.userId) as {
+    .all(req.authedPrincipal!.principalKeyId) as {
     id: string;
     prefix: string;
     permissions: string;
@@ -36,12 +36,12 @@ agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
 agentKeysRouter.get("/current", requireAgentKey, (req, res) => {
   const row = db
     .prepare(
-      "SELECT id, userId, prefix, keyHash, permissions, createdAt FROM agentKeys WHERE id = ?",
+      "SELECT id, principalKeyId, prefix, keyHash, permissions, createdAt FROM agentKeys WHERE id = ?",
     )
     .get(req.authedAgentKey!.agentKeyId) as
     | {
         id: string;
-        userId: string;
+        principalKeyId: string;
         prefix: string;
         keyHash: string;
         permissions: string;
@@ -60,7 +60,7 @@ agentKeysRouter.get("/current", requireAgentKey, (req, res) => {
 
   res.json({
     id: row.id,
-    userId: row.userId,
+    principalKeyId: row.principalKeyId,
     prefix: row.prefix,
     keyHash: row.keyHash,
     permissions: JSON.parse(row.permissions),
@@ -90,8 +90,8 @@ agentKeysRouter.post("/create", requirePrincipalKey, (req, res) => {
   const keyHash = sha256(plaintextKey);
 
   db.prepare(
-    "INSERT INTO agentKeys (id, userId, prefix, keyHash, permissions, createdAt) VALUES (?, ?, ?, ?, '{}', ?)",
-  ).run(id, req.authedUser!.userId, trimmedPrefix, keyHash, Date.now());
+    "INSERT INTO agentKeys (id, principalKeyId, prefix, keyHash, permissions, createdAt) VALUES (?, ?, ?, ?, '{}', ?)",
+  ).run(id, req.authedPrincipal!.principalKeyId, trimmedPrefix, keyHash, Date.now());
 
   res.json({ id, prefix: trimmedPrefix, key: plaintextKey });
 });
@@ -99,8 +99,8 @@ agentKeysRouter.post("/create", requirePrincipalKey, (req, res) => {
 // Delete a key
 agentKeysRouter.delete("/:id", requirePrincipalKey, (req, res) => {
   const result = db
-    .prepare("DELETE FROM agentKeys WHERE id = ? AND userId = ?")
-    .run(req.params.id, req.authedUser!.userId);
+    .prepare("DELETE FROM agentKeys WHERE id = ? AND principalKeyId = ?")
+    .run(req.params.id, req.authedPrincipal!.principalKeyId);
 
   if (result.changes === 0) {
     res.status(404).json({ error: "Agent key not found." });
@@ -130,8 +130,10 @@ agentKeysRouter.put("/:id/permissions", requirePrincipalKey, (req, res) => {
   const { permissions } = req.body as { permissions?: unknown };
 
   const keyRow = db
-    .prepare("SELECT id FROM agentKeys WHERE id = ? AND userId = ?")
-    .get(req.params.id, req.authedUser!.userId) as { id: string } | undefined;
+    .prepare("SELECT id FROM agentKeys WHERE id = ? AND principalKeyId = ?")
+    .get(req.params.id, req.authedPrincipal!.principalKeyId) as
+    | { id: string }
+    | undefined;
 
   if (!keyRow) {
     res.status(404).json({ error: "Agent key not found." });

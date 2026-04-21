@@ -178,15 +178,15 @@ test(
 
     const { db } = await import("../src/db.js");
 
-    // Seed a principal key directly so the rest of the test can exercise app behavior without a real OAuth callback.
-    const principalKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
+    // Seed an existing principal so the GitHub App callback can exercise recovery behavior.
+    const originalPrincipalKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
     db.prepare(
-      "INSERT INTO users (id, githubId, githubLogin, principalKeyHash, createdAt) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO principalKeys (id, githubId, keyHash, githubLogin, createdAt) VALUES (?, ?, ?, ?, ?)",
     ).run(
       crypto.randomUUID(),
       String(githubUser.id),
+      crypto.createHash("sha256").update(originalPrincipalKey).digest("hex"),
       githubUser.login,
-      crypto.createHash("sha256").update(principalKey).digest("hex"),
       Date.now(),
     );
     const { app } = await import("../src/app.js");
@@ -200,20 +200,12 @@ test(
       const issueTitle = `proxy issue ${runId}`;
       const pullTitle = `proxy pull ${runId}`;
 
-      // OAuth entrypoint should redirect the browser to GitHub rather than handling auth inline.
-      const redirectResponse = await request(app)
-        .get("/users/sign-in-with-oauth-and-rotate-principal-key")
-        .redirects(0);
-      await assertStatus(redirectResponse, 302, "redirectResponse");
-      assert.match(
-        redirectResponse.headers.location ?? "",
-        /^https:\/\/github\.com\/login\/oauth\/authorize\?/,
-      );
-
       // Validate the unhappy-path auth and authorization responses before doing any privileged work.
-      const missingCodeResponse = await request(app).get("/users/oauth-flow-callback");
-      await assertStatus(missingCodeResponse, 400, "missingCodeResponse");
-      assert.equal(missingCodeResponse.text, "Missing code parameter.");
+      const missingInstallationIdResponse = await request(app).get(
+        "/principalKeys/github-app-callback",
+      );
+      await assertStatus(missingInstallationIdResponse, 400, "missingInstallationIdResponse");
+      assert.equal(missingInstallationIdResponse.text, "Missing installation_id parameter.");
 
       const requestsWithoutAuth = await request(app).get("/requests");
       await assertStatus(requestsWithoutAuth, 401, "requestsWithoutAuth");
@@ -230,11 +222,11 @@ test(
 
       // A seeded principal key should see the user's GitHub App installations.
       const installationsResponse = await request(app)
-        .get("/users/installations")
-        .set("Authorization", `Bearer ${principalKey}`);
+        .get("/principalKeys/installations")
+        .set("Authorization", `Bearer ${originalPrincipalKey}`);
       await assertStatus(installationsResponse, 200, "installationsResponse");
       const installationsBody = installationsResponse.body as {
-        installations: Array<{ account?: string }>;
+        installations: Array<{ id: number; account?: string }>;
       };
       assert(
         installationsBody.installations.some(
@@ -242,8 +234,54 @@ test(
         ),
         `Expected GitHub App installation for ${owner}.`,
       );
+      const ownerInstallation = installationsBody.installations.find(
+        (installation) => installation.account === owner,
+      );
+      assert(ownerInstallation, `Expected installation id for ${owner}.`);
 
-      // New users start with no agent keys, and principal keys cannot impersonate an agent key.
+      // Existing principals can create agent keys before a reinstall recovery flow rotates them away.
+      const revokedKeyResponse = await request(app)
+        .post("/agentKeys/create")
+        .set("Authorization", `Bearer ${originalPrincipalKey}`)
+        .send({
+          prefix: "e_recovery",
+        });
+      await assertStatus(revokedKeyResponse, 200, "revokedKeyResponse");
+      const revokedKeyBody = revokedKeyResponse.body as {
+        key: string;
+      };
+
+      // Reinstalling the GitHub App should rotate the principal key and revoke existing agent keys.
+      const bootstrapResponse = await request(app).get(
+        `/principalKeys/github-app-callback?installation_id=${ownerInstallation.id}`,
+      );
+      await assertStatus(bootstrapResponse, 200, "bootstrapResponse");
+      assert.match(bootstrapResponse.text, /GitHub App setup complete/);
+      assert.match(
+        bootstrapResponse.text,
+        /Existing principal key rotated\. Existing agent keys were deleted\./,
+      );
+      const principalKeyMatch = bootstrapResponse.text.match(
+        /<code>(pk_[a-f0-9]{64})<\/code>/,
+      );
+      assert(
+        principalKeyMatch,
+        `Expected principal key in HTML response. Received: ${bootstrapResponse.text}`,
+      );
+      const principalKey = principalKeyMatch[1];
+      assert.notEqual(principalKey, originalPrincipalKey);
+
+      const rotatedPrincipalRequests = await request(app)
+        .get("/requests")
+        .set("Authorization", `Bearer ${originalPrincipalKey}`);
+      await assertStatus(rotatedPrincipalRequests, 401, "rotatedPrincipalRequests");
+
+      const revokedAgentKeyAccess = await request(app)
+        .get("/agentKeys/current")
+        .set("Authorization", `Bearer ${revokedKeyBody.key}`);
+      await assertStatus(revokedAgentKeyAccess, 401, "revokedAgentKeyAccess");
+
+      // After rotation, no agent keys remain, and principal keys cannot impersonate an agent key.
       const initialKeysResponse = await request(app)
         .get("/agentKeys")
         .set("Authorization", `Bearer ${principalKey}`);

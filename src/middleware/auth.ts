@@ -2,18 +2,19 @@ import type { Request, Response, NextFunction } from "express";
 import { db } from "../db.js";
 import { sha256 } from "../lib/crypto.js";
 
-export type AuthedUser = {
-  userId: string;
-  githubLogin: string;
+export type AuthedPrincipal = {
+  principalKeyId: string;
+  githubId: string;
+  githubLogin: string | null;
 };
 
-export type AuthedAgentKey = AuthedUser & {
+export type AuthedAgentKey = AuthedPrincipal & {
   agentKeyId: string;
   permissions: Record<string, Record<string, string>>;
 };
 
-// Resolves any valid key (principal key or agent key) to a user.
-// Attaches req.authedUser. If it's an agent key, also attaches req.authedAgentKey.
+// Resolves any valid key (principal key or agent key) to a principal.
+// Attaches req.authedPrincipal. If it's an agent key, also attaches req.authedAgentKey.
 export function requireAnyKey(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
@@ -21,18 +22,24 @@ export function requireAnyKey(req: Request, res: Response, next: NextFunction) {
     return;
   }
   const token = header.slice(7);
-
   const hash = sha256(token);
 
   // Check principal key first
-  const userByPrincipal = db
-    .prepare("SELECT id, githubLogin FROM users WHERE principalKeyHash = ?")
-    .get(hash) as { id: string; githubLogin: string } | undefined;
+  const principalByKey = db
+    .prepare("SELECT id, githubId, githubLogin FROM principalKeys WHERE keyHash = ?")
+    .get(hash) as
+    | {
+        id: string;
+        githubId: string;
+        githubLogin: string | null;
+      }
+    | undefined;
 
-  if (userByPrincipal) {
-    req.authedUser = {
-      userId: userByPrincipal.id,
-      githubLogin: userByPrincipal.githubLogin,
+  if (principalByKey) {
+    req.authedPrincipal = {
+      principalKeyId: principalByKey.id,
+      githubId: principalByKey.githubId,
+      githubLogin: principalByKey.githubLogin,
     };
     next();
     return;
@@ -41,26 +48,29 @@ export function requireAnyKey(req: Request, res: Response, next: NextFunction) {
   // Check agent key
   const agentKeyRow = db
     .prepare(
-      `SELECT ak.id as agentKeyId, ak.userId, ak.permissions, u.githubLogin
-       FROM agentKeys ak JOIN users u ON ak.userId = u.id
+      `SELECT ak.id as agentKeyId, ak.principalKeyId, ak.permissions, pk.githubId, pk.githubLogin
+       FROM agentKeys ak JOIN principalKeys pk ON ak.principalKeyId = pk.id
        WHERE ak.keyHash = ?`,
     )
     .get(hash) as
     | {
         agentKeyId: string;
-        userId: string;
+        principalKeyId: string;
         permissions: string;
-        githubLogin: string;
+        githubId: string;
+        githubLogin: string | null;
       }
     | undefined;
 
   if (agentKeyRow) {
-    req.authedUser = {
-      userId: agentKeyRow.userId,
+    req.authedPrincipal = {
+      principalKeyId: agentKeyRow.principalKeyId,
+      githubId: agentKeyRow.githubId,
       githubLogin: agentKeyRow.githubLogin,
     };
     req.authedAgentKey = {
-      userId: agentKeyRow.userId,
+      principalKeyId: agentKeyRow.principalKeyId,
+      githubId: agentKeyRow.githubId,
       githubLogin: agentKeyRow.githubLogin,
       agentKeyId: agentKeyRow.agentKeyId,
       permissions: JSON.parse(agentKeyRow.permissions),
@@ -110,7 +120,7 @@ export function requirePrincipalKey(
 declare global {
   namespace Express {
     interface Request {
-      authedUser?: AuthedUser;
+      authedPrincipal?: AuthedPrincipal;
       authedAgentKey?: AuthedAgentKey;
     }
   }

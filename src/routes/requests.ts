@@ -10,13 +10,13 @@ requestsRouter.get("/", requireAnyKey, (req, res) => {
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
   const offset = (page - 1) * limit;
 
-  // If authed via an agent key, scope to that key. Otherwise (principal key), show all user requests.
+  // If authed via an agent key, scope to that key. Otherwise (principal key), show all principal requests.
   const whereClause = req.authedAgentKey
     ? "WHERE r.agentKeyId = ?"
-    : "WHERE r.userId = ?";
+    : "WHERE ak.principalKeyId = ?";
   const whereParam = req.authedAgentKey
     ? req.authedAgentKey.agentKeyId
-    : req.authedUser!.userId;
+    : req.authedPrincipal!.principalKeyId;
 
   const rows = db
     .prepare(
@@ -38,7 +38,12 @@ requestsRouter.get("/", requireAnyKey, (req, res) => {
 
   const total = (
     db
-      .prepare(`SELECT COUNT(*) as count FROM requests r ${whereClause}`)
+      .prepare(
+        `SELECT COUNT(*) as count
+         FROM requests r
+         JOIN agentKeys ak ON r.agentKeyId = ak.id
+         ${whereClause}`,
+      )
       .get(whereParam) as { count: number }
   ).count;
 

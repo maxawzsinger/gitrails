@@ -55,10 +55,9 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
 
     // Log request + response
     db.prepare(
-      "INSERT INTO requests (id, userId, agentKeyId, encryptedRequest, encryptedResponse, createdAt) VALUES (?, ?, ?, ?, ?, ?)"
+      "INSERT INTO requests (id, agentKeyId, encryptedRequest, encryptedResponse, createdAt) VALUES (?, ?, ?, ?, ?)"
     ).run(
       uuid(),
-      req.authedUser!.userId,
       req.authedAgentKey!.agentKeyId,
       encrypt(truncateForStorage(parsed.data)),
       encrypt(truncateForStorage(result)),
