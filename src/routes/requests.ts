@@ -1,22 +1,20 @@
 import { Router } from "express";
+import type { Request, Response } from "express";
 import { db } from "../db.js";
-import { requireAnyKey } from "../middleware/auth.js";
+import { requireAgentKey, requirePrincipalKey } from "../middleware/auth.js";
 import { decrypt } from "../lib/encryption.js";
 
 export const requestsRouter = Router();
 
-requestsRouter.get("/", requireAnyKey, (req, res) => {
+function sendRequestsResponse(
+  req: Request,
+  res: Response,
+  whereClause: string,
+  whereParam: string,
+) {
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
   const offset = (page - 1) * limit;
-
-  // If authed via an agent key, scope to that key. Otherwise (principal key), show all principal requests.
-  const whereClause = req.authedAgentKey
-    ? "WHERE r.agentKeyId = ?"
-    : "WHERE ak.principalKeyId = ?";
-  const whereParam = req.authedAgentKey
-    ? req.authedAgentKey.agentKeyId
-    : req.authedPrincipal!.principalKeyId;
 
   const rows = db
     .prepare(
@@ -59,4 +57,12 @@ requestsRouter.get("/", requireAnyKey, (req, res) => {
       createdAt: r.createdAt,
     })),
   });
+}
+
+requestsRouter.get("/", requireAgentKey, (req, res) => {
+  sendRequestsResponse(req, res, "WHERE r.agentKeyId = ?", req.authedAgentKey!.agentKeyId);
+});
+
+requestsRouter.get("/all", requirePrincipalKey, (req, res) => {
+  sendRequestsResponse(req, res, "WHERE ak.githubTargetId = ?", req.authedGitHubTarget!.githubTargetId);
 });

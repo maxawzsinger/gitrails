@@ -11,3 +11,7 @@ export type EndpointObject<TSchema extends AnyZodObject = AnyZodObject> = {
   executeRequest: (request: z.infer<TSchema>) => Promise<unknown>;
   documentation: string;
 };
+
+export type RequestForEndpoint<TEndpoint extends EndpointObject> = z.infer<
+  TEndpoint["requestSchema"]
+>;

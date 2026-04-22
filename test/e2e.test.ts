@@ -178,10 +178,10 @@ test(
 
     const { db } = await import("../src/db.js");
 
-    // Seed an existing principal so the GitHub App callback can exercise recovery behavior.
+    // Seed an existing principal key so the GitHub App callback can exercise recovery behavior.
     const originalPrincipalKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
     db.prepare(
-      "INSERT INTO principalKeys (id, githubId, keyHash, githubLogin, createdAt) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO githubTargets (id, githubId, keyHash, githubLogin, createdAt) VALUES (?, ?, ?, ?, ?)",
     ).run(
       crypto.randomUUID(),
       String(githubUser.id),
@@ -202,7 +202,7 @@ test(
 
       // Validate the unhappy-path auth and authorization responses before doing any privileged work.
       const missingInstallationIdResponse = await request(app).get(
-        "/principalKeys/github-app-callback",
+        "/githubTargets/github-app-callback",
       );
       await assertStatus(missingInstallationIdResponse, 400, "missingInstallationIdResponse");
       assert.equal(missingInstallationIdResponse.text, "Missing installation_id parameter.");
@@ -220,28 +220,25 @@ test(
         "Invalid principal key or agent key.",
       );
 
-      // A seeded principal key should see the user's GitHub App installations.
-      const installationsResponse = await request(app)
-        .get("/principalKeys/installations")
-        .set("Authorization", `Bearer ${originalPrincipalKey}`);
-      await assertStatus(installationsResponse, 200, "installationsResponse");
-      const installationsBody = installationsResponse.body as {
-        installations: Array<{ id: number; account?: string }>;
-      };
-      assert(
-        installationsBody.installations.some(
-          (installation) => installation.account === owner,
-        ),
-        `Expected GitHub App installation for ${owner}.`,
+      // Resolve the repo's GitHub App installation so the setup callback can be exercised directly.
+      const { app: githubAppClient } = await import("../src/lib/octokit.js");
+      const ownerInstallationResponse = await githubAppClient.octokit.request(
+        "GET /repos/{owner}/{repo}/installation",
+        { owner, repo },
       );
-      const ownerInstallation = installationsBody.installations.find(
-        (installation) => installation.account === owner,
+      const ownerInstallation = ownerInstallationResponse.data;
+      const ownerInstallationAccount = ownerInstallation.account;
+      assert(ownerInstallationAccount, `Expected installation account for ${owner}.`);
+      assert.equal(
+        "login" in ownerInstallationAccount
+          ? ownerInstallationAccount.login
+          : ownerInstallationAccount.slug,
+        owner,
       );
-      assert(ownerInstallation, `Expected installation id for ${owner}.`);
 
-      // Existing principals can create agent keys before a reinstall recovery flow rotates them away.
+      // Existing principals can create agent keys before a reinstall recovery flow rotates the principal key.
       const revokedKeyResponse = await request(app)
-        .post("/agentKeys/create")
+        .post("/agentKeys")
         .set("Authorization", `Bearer ${originalPrincipalKey}`)
         .send({
           prefix: "e_recovery",
@@ -251,15 +248,15 @@ test(
         key: string;
       };
 
-      // Reinstalling the GitHub App should rotate the principal key and revoke existing agent keys.
+      // Reinstalling the GitHub App should rotate the principal key without revoking existing agent keys.
       const bootstrapResponse = await request(app).get(
-        `/principalKeys/github-app-callback?installation_id=${ownerInstallation.id}`,
+        `/githubTargets/github-app-callback?installation_id=${ownerInstallation.id}`,
       );
       await assertStatus(bootstrapResponse, 200, "bootstrapResponse");
       assert.match(bootstrapResponse.text, /GitHub App setup complete/);
       assert.match(
         bootstrapResponse.text,
-        /Existing principal key rotated\. Existing agent keys were deleted\./,
+        /Existing principal key rotated\. Existing agent keys were preserved\./,
       );
       const principalKeyMatch = bootstrapResponse.text.match(
         /<code>(pk_[a-f0-9]{64})<\/code>/,
@@ -272,31 +269,52 @@ test(
       assert.notEqual(principalKey, originalPrincipalKey);
 
       const rotatedPrincipalRequests = await request(app)
-        .get("/requests")
+        .get("/requests/all")
         .set("Authorization", `Bearer ${originalPrincipalKey}`);
-      await assertStatus(rotatedPrincipalRequests, 401, "rotatedPrincipalRequests");
+      await assertStatus(
+        rotatedPrincipalRequests,
+        401,
+        "rotatedPrincipalRequests",
+      );
 
-      const revokedAgentKeyAccess = await request(app)
+      const preservedAgentKeyAccess = await request(app)
         .get("/agentKeys/current")
         .set("Authorization", `Bearer ${revokedKeyBody.key}`);
-      await assertStatus(revokedAgentKeyAccess, 401, "revokedAgentKeyAccess");
+      await assertStatus(preservedAgentKeyAccess, 200, "preservedAgentKeyAccess");
 
-      // After rotation, no agent keys remain, and principal keys cannot impersonate an agent key.
+      // After rotation, existing agent keys remain, and principal keys cannot impersonate an agent key.
       const initialKeysResponse = await request(app)
         .get("/agentKeys")
         .set("Authorization", `Bearer ${principalKey}`);
       await assertStatus(initialKeysResponse, 200, "initialKeysResponse");
       const initialKeysBody = initialKeysResponse.body as Array<{ id: string }>;
-      assert.equal(initialKeysBody.length, 0);
+      assert.equal(initialKeysBody.length, 1);
 
       const currentWithPrincipalKey = await request(app)
         .get("/agentKeys/current")
         .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(currentWithPrincipalKey, 403, "currentWithPrincipalKey");
+      await assertStatus(
+        currentWithPrincipalKey,
+        403,
+        "currentWithPrincipalKey",
+      );
+      assert.equal(
+        currentWithPrincipalKey.body.error,
+        "This endpoint requires an agent key, not a principal key.",
+      );
+
+      const principalKeyRequestsScope = await request(app)
+        .get("/requests")
+        .set("Authorization", `Bearer ${principalKey}`);
+      await assertStatus(principalKeyRequestsScope, 403, "principalKeyRequestsScope");
+      assert.equal(
+        principalKeyRequestsScope.body.error,
+        "This endpoint requires an agent key, not a principal key.",
+      );
 
       // Prefix validation keeps agent-key identifiers URL-safe and predictable.
       const badPrefixResponse = await request(app)
-        .post("/agentKeys/create")
+        .post("/agentKeys")
         .set("Authorization", `Bearer ${principalKey}`)
         .send({
           prefix: "Bad Prefix",
@@ -305,7 +323,7 @@ test(
 
       // Create the primary agent key that will drive the rest of the proxy exercise.
       const createdKeyResponse = await request(app)
-        .post("/agentKeys/create")
+        .post("/agentKeys")
         .set("Authorization", `Bearer ${principalKey}`)
         .send({
           prefix: "e_primary",
@@ -511,6 +529,25 @@ test(
       await assertStatus(validationFailureResponse, 400, "validationFailureResponse");
       assert.equal(validationFailureResponse.body.error, "Request validation failed.");
 
+      const invalidStringifiedJsonResponse = await request(app)
+        .post("/execute")
+        .set("Authorization", `Bearer ${primaryAgentKey}`)
+        .send({
+          actionName: "github.git.createTree",
+          owner,
+          repo,
+          stringifiedTree: "{not valid json}",
+        });
+      await assertStatus(
+        invalidStringifiedJsonResponse,
+        400,
+        "invalidStringifiedJsonResponse",
+      );
+      assert.equal(
+        invalidStringifiedJsonResponse.body.error,
+        'Invalid JSON for "stringifiedTree". Expected a JSON array string. Check the endpoint documentation for stringified params.',
+      );
+
       // Principal keys are management credentials, not execution credentials.
       const executeWithPrincipalKey = await request(app)
         .post("/execute")
@@ -520,7 +557,11 @@ test(
           owner,
           repo,
         });
-      await assertStatus(executeWithPrincipalKey, 403, "executeWithPrincipalKey");
+      await assertStatus(
+        executeWithPrincipalKey,
+        403,
+        "executeWithPrincipalKey",
+      );
 
       // Read the repo through the proxy and capture the default branch for later git operations.
       const repoResponse = await request(app)
@@ -701,14 +742,14 @@ test(
           owner,
           repo,
           base_tree: baseCommitBody.tree.sha,
-          tree: [
+          stringifiedTree: JSON.stringify([
             {
               path: branchFilePath,
               mode: "100644",
               type: "blob",
               sha: createdBlobBody.sha,
             },
-          ],
+          ]),
         });
       await assertStatus(createdTreeResponse, 200, "createdTreeResponse");
 
@@ -723,11 +764,11 @@ test(
           repo,
           message: `commit ${runId}`,
           tree: createdTreeBody.sha,
-          parents: [defaultRefBody.object.sha],
-          author: {
+          stringifiedParents: JSON.stringify([defaultRefBody.object.sha]),
+          stringifiedAuthor: JSON.stringify({
             name: owner,
             email: TEST_GITHUB_EMAIL,
-          },
+          }),
         });
       await assertStatus(createdCommitResponse, 200, "createdCommitResponse");
 
@@ -1004,9 +1045,13 @@ test(
 
       // The principal key should see the broader request history for all agent activity.
       const principalRequestsResponse = await request(app)
-        .get("/requests")
+        .get("/requests/all")
         .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(principalRequestsResponse, 200, "principalRequestsResponse");
+      await assertStatus(
+        principalRequestsResponse,
+        200,
+        "principalRequestsResponse",
+      );
       const principalRequestsBody = principalRequestsResponse.body as {
         total: number;
         requests: Array<{
@@ -1024,7 +1069,7 @@ test(
 
       // Create a second key to prove request history and permissions are scoped per agent key.
       const secondKeyResponse = await request(app)
-        .post("/agentKeys/create")
+        .post("/agentKeys")
         .set("Authorization", `Bearer ${principalKey}`)
         .send({
           prefix: "e_secondary",
@@ -1075,6 +1120,15 @@ test(
       assert.equal(
         secondKeyRequestsBody.requests[0]?.request.actionName,
         "github.repos.get",
+      );
+
+      const allRequestsWithAgentKey = await request(app)
+        .get("/requests/all")
+        .set("Authorization", `Bearer ${secondKeyBody.key}`);
+      await assertStatus(allRequestsWithAgentKey, 403, "allRequestsWithAgentKey");
+      assert.equal(
+        allRequestsWithAgentKey.body.error,
+        "This endpoint requires a principal key, not an agent key.",
       );
 
       const primaryKeyRequestsResponse = await request(app)

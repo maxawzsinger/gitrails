@@ -3,7 +3,10 @@ import { v4 as uuid } from "uuid";
 import { db } from "../db.js";
 import { requireAgentKey } from "../middleware/auth.js";
 import { endpointRegistry } from "../lib/endpointRegistry.js";
+import type { EndpointObject } from "../lib/endpointTypes.js";
+import type { ActionName } from "../lib/permissionTypes.js";
 import { encrypt, truncateForStorage } from "../lib/encryption.js";
+import { EndpointRequestError } from "../lib/stringifiedJson.js";
 
 export const executeRouter = Router();
 
@@ -17,11 +20,12 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
   }
 
   // Registry lookup
-  const endpoint = endpointRegistry[actionName];
-  if (!endpoint) {
+  if (!Object.hasOwn(endpointRegistry, actionName)) {
     res.status(400).json({ error: `Unknown action: "${actionName}".` });
     return;
   }
+  const typedActionName = actionName as ActionName;
+  const endpoint = endpointRegistry[typedActionName] as EndpointObject;
 
   // Schema validation
   const parsed = endpoint.requestSchema.safeParse(body);
@@ -32,7 +36,7 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
 
   // Permission check
   const perms = req.authedAgentKey!.permissions;
-  const actionPerms = perms[actionName];
+  const actionPerms = perms[typedActionName];
   if (!actionPerms) {
     res.status(403).json({ error: `No permission for action "${actionName}".` });
     return;
@@ -66,6 +70,10 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
 
     res.json(result);
   } catch (err: unknown) {
+    if (err instanceof EndpointRequestError) {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(502).json({ error: `GitHub API error: ${message}` });
   }

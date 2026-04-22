@@ -2,7 +2,7 @@ import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { DATABASE_PATH } from "./config.js";
 
 export const DB_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS principalKeys (
+  CREATE TABLE IF NOT EXISTS githubTargets (
     id TEXT PRIMARY KEY,
     githubId TEXT UNIQUE NOT NULL,
     keyHash TEXT NOT NULL,
@@ -12,7 +12,7 @@ export const DB_SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS agentKeys (
     id TEXT PRIMARY KEY,
-    principalKeyId TEXT NOT NULL REFERENCES principalKeys(id) ON DELETE CASCADE,
+    githubTargetId TEXT NOT NULL REFERENCES githubTargets(id) ON DELETE CASCADE,
     prefix TEXT NOT NULL,
     keyHash TEXT UNIQUE NOT NULL,
     permissions TEXT NOT NULL DEFAULT '{}',
@@ -20,7 +20,7 @@ export const DB_SCHEMA = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_agentKeys_keyHash ON agentKeys(keyHash);
-  CREATE INDEX IF NOT EXISTS idx_agentKeys_principalKeyId ON agentKeys(principalKeyId);
+  CREATE INDEX IF NOT EXISTS idx_agentKeys_githubTargetId ON agentKeys(githubTargetId);
 
   CREATE TABLE IF NOT EXISTS requests (
     id TEXT PRIMARY KEY,

@@ -4,9 +4,8 @@ import { v4 as uuid } from "uuid";
 import { sha256 } from "../lib/crypto.js";
 import { app as githubApp } from "../lib/octokit.js";
 import { db } from "../db.js";
-import { requirePrincipalKey } from "../middleware/auth.js";
 
-export const principalKeysRouter = Router();
+export const githubTargetsRouter = Router();
 
 type GitHubAccount =
   | { id: number; login: string }
@@ -24,28 +23,8 @@ function getGitHubAccountHandle(account: GitHubAccount): string | null {
   return account.slug;
 }
 
-principalKeysRouter.get("/installations", requirePrincipalKey, async (_req, res) => {
-  const installations: {
-    id: number;
-    account: string | undefined;
-    permissions: Record<string, string> | undefined;
-    repositorySelection: string;
-  }[] = [];
-
-  for await (const { installation } of githubApp.eachInstallation.iterator()) {
-    installations.push({
-      id: installation.id,
-      account: getGitHubAccountHandle(installation.account) ?? undefined,
-      permissions: installation.permissions,
-      repositorySelection: installation.repository_selection,
-    });
-  }
-
-  res.json({ installations });
-});
-
 // GitHub App setup callback. Configure the app's setup URL to point here.
-principalKeysRouter.get("/github-app-callback", async (req, res) => {
+githubTargetsRouter.get("/github-app-callback", async (req, res) => {
   const installationIdParam = req.query.installation_id;
   if (typeof installationIdParam !== "string") {
     res.status(400).send("Missing installation_id parameter.");
@@ -78,29 +57,24 @@ principalKeysRouter.get("/github-app-callback", async (req, res) => {
       : "GitHub App installation detected.";
     const principalKeyPlaintext = `pk_${crypto.randomBytes(32).toString("hex")}`;
     const keyHash = sha256(principalKeyPlaintext);
-    const existingPrincipal = db
-      .prepare("SELECT id FROM principalKeys WHERE githubId = ?")
+    const existingGitHubTarget = db
+      .prepare("SELECT id FROM githubTargets WHERE githubId = ?")
       .get(githubId) as { id: string } | undefined;
 
-    const didRotateExistingKey = existingPrincipal !== undefined;
+    const didRotateExistingKey = existingGitHubTarget !== undefined;
     const recoveryMessage = didRotateExistingKey
-      ? "Existing principal key rotated. Existing agent keys were deleted."
+      ? "Existing principal key rotated. Existing agent keys were preserved."
       : "New principal key created.";
 
-    if (existingPrincipal) {
-      db.transaction(() => {
-        db.prepare("UPDATE principalKeys SET keyHash = ?, githubLogin = ? WHERE id = ?").run(
-          keyHash,
-          githubLogin,
-          existingPrincipal.id,
-        );
-        db.prepare("DELETE FROM agentKeys WHERE principalKeyId = ?").run(
-          existingPrincipal.id,
-        );
-      })();
+    if (existingGitHubTarget) {
+      db.prepare("UPDATE githubTargets SET keyHash = ?, githubLogin = ? WHERE id = ?").run(
+        keyHash,
+        githubLogin,
+        existingGitHubTarget.id,
+      );
     } else {
       db.prepare(
-        "INSERT INTO principalKeys (id, githubId, keyHash, githubLogin, createdAt) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO githubTargets (id, githubId, keyHash, githubLogin, createdAt) VALUES (?, ?, ?, ?, ?)",
       ).run(uuid(), githubId, keyHash, githubLogin, Date.now());
     }
 

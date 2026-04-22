@@ -2,8 +2,9 @@ import { Router } from "express";
 import crypto from "node:crypto";
 import { v4 as uuid } from "uuid";
 import { sha256 } from "../lib/crypto.js";
+import type { Perms } from "../lib/permissionTypes.js";
 import { db } from "../db.js";
-import { validatePerms } from "../lib/validatePerms.js";
+import { parsePermsJson, validatePerms } from "../lib/validatePerms.js";
 import { requireAgentKey, requirePrincipalKey } from "../middleware/auth.js";
 
 export const agentKeysRouter = Router();
@@ -13,9 +14,9 @@ const AGENT_KEY_PREFIX_REGEX = /^[a-z_]+$/;
 agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
   const rows = db
     .prepare(
-      "SELECT id, prefix, permissions, createdAt FROM agentKeys WHERE principalKeyId = ? ORDER BY createdAt DESC",
+      "SELECT id, prefix, permissions, createdAt FROM agentKeys WHERE githubTargetId = ? ORDER BY createdAt DESC",
     )
-    .all(req.authedPrincipal!.principalKeyId) as {
+    .all(req.authedGitHubTarget!.githubTargetId) as {
     id: string;
     prefix: string;
     permissions: string;
@@ -26,7 +27,7 @@ agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
     rows.map((r) => ({
       id: r.id,
       prefix: r.prefix,
-      permissions: JSON.parse(r.permissions),
+      permissions: parsePermsJson(r.permissions),
       createdAt: r.createdAt,
     })),
   );
@@ -36,12 +37,12 @@ agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
 agentKeysRouter.get("/current", requireAgentKey, (req, res) => {
   const row = db
     .prepare(
-      "SELECT id, principalKeyId, prefix, keyHash, permissions, createdAt FROM agentKeys WHERE id = ?",
+      "SELECT id, githubTargetId, prefix, keyHash, permissions, createdAt FROM agentKeys WHERE id = ?",
     )
     .get(req.authedAgentKey!.agentKeyId) as
     | {
         id: string;
-        principalKeyId: string;
+        githubTargetId: string;
         prefix: string;
         keyHash: string;
         permissions: string;
@@ -60,16 +61,16 @@ agentKeysRouter.get("/current", requireAgentKey, (req, res) => {
 
   res.json({
     id: row.id,
-    principalKeyId: row.principalKeyId,
+    githubTargetId: row.githubTargetId,
     prefix: row.prefix,
     keyHash: row.keyHash,
-    permissions: JSON.parse(row.permissions),
+    permissions: parsePermsJson(row.permissions),
     createdAt: row.createdAt,
   });
 });
 
 // Create a new key
-agentKeysRouter.post("/create", requirePrincipalKey, (req, res) => {
+agentKeysRouter.post("/", requirePrincipalKey, (req, res) => {
   const { prefix } = req.body as { prefix?: string };
   if (!prefix || typeof prefix !== "string" || prefix.trim().length === 0) {
     res.status(400).json({ error: "prefix is required." });
@@ -90,8 +91,8 @@ agentKeysRouter.post("/create", requirePrincipalKey, (req, res) => {
   const keyHash = sha256(plaintextKey);
 
   db.prepare(
-    "INSERT INTO agentKeys (id, principalKeyId, prefix, keyHash, permissions, createdAt) VALUES (?, ?, ?, ?, '{}', ?)",
-  ).run(id, req.authedPrincipal!.principalKeyId, trimmedPrefix, keyHash, Date.now());
+    "INSERT INTO agentKeys (id, githubTargetId, prefix, keyHash, permissions, createdAt) VALUES (?, ?, ?, ?, '{}', ?)",
+  ).run(id, req.authedGitHubTarget!.githubTargetId, trimmedPrefix, keyHash, Date.now());
 
   res.json({ id, prefix: trimmedPrefix, key: plaintextKey });
 });
@@ -99,8 +100,8 @@ agentKeysRouter.post("/create", requirePrincipalKey, (req, res) => {
 // Delete a key
 agentKeysRouter.delete("/:id", requirePrincipalKey, (req, res) => {
   const result = db
-    .prepare("DELETE FROM agentKeys WHERE id = ? AND principalKeyId = ?")
-    .run(req.params.id, req.authedPrincipal!.principalKeyId);
+    .prepare("DELETE FROM agentKeys WHERE id = ? AND githubTargetId = ?")
+    .run(req.params.id, req.authedGitHubTarget!.githubTargetId);
 
   if (result.changes === 0) {
     res.status(404).json({ error: "Agent key not found." });
@@ -127,11 +128,11 @@ Example permissions object:
 }
 */
 agentKeysRouter.put("/:id/permissions", requirePrincipalKey, (req, res) => {
-  const { permissions } = req.body as { permissions?: unknown };
+  const { permissions } = req.body as { permissions?: Perms | unknown };
 
   const keyRow = db
-    .prepare("SELECT id FROM agentKeys WHERE id = ? AND principalKeyId = ?")
-    .get(req.params.id, req.authedPrincipal!.principalKeyId) as
+    .prepare("SELECT id FROM agentKeys WHERE id = ? AND githubTargetId = ?")
+    .get(req.params.id, req.authedGitHubTarget!.githubTargetId) as
     | { id: string }
     | undefined;
 
@@ -147,7 +148,7 @@ agentKeysRouter.put("/:id/permissions", requirePrincipalKey, (req, res) => {
   }
 
   db.prepare("UPDATE agentKeys SET permissions = ? WHERE id = ?").run(
-    JSON.stringify(permissions),
+    JSON.stringify(result.perms),
     req.params.id,
   );
 

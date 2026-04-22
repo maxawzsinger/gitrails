@@ -1,17 +1,19 @@
 import { endpointRegistry } from "./endpointRegistry.js";
+import type { ActionName, Perms } from "./permissionTypes.js";
 
-export type Perms = Record<string, Record<string, string>>;
-
-export function validatePerms(perms: unknown): { ok: true } | { ok: false; error: string } {
+export function validatePerms(
+  perms: unknown,
+): { ok: true; perms: Perms } | { ok: false; error: string } {
   if (typeof perms !== "object" || perms === null || Array.isArray(perms)) {
     return { ok: false, error: "Permissions must be a JSON object." };
   }
 
   for (const [actionName, paramConstraints] of Object.entries(perms as Record<string, unknown>)) {
-    const endpoint = endpointRegistry[actionName];
-    if (!endpoint) {
+    if (!Object.hasOwn(endpointRegistry, actionName)) {
       return { ok: false, error: `Unknown action: "${actionName}".` };
     }
+    const typedActionName = actionName as ActionName;
+    const endpoint = endpointRegistry[typedActionName];
 
     if (typeof paramConstraints !== "object" || paramConstraints === null || Array.isArray(paramConstraints)) {
       return { ok: false, error: `Constraints for "${actionName}" must be a JSON object.` };
@@ -41,5 +43,22 @@ export function validatePerms(perms: unknown): { ok: true } | { ok: false; error
     }
   }
 
-  return { ok: true };
+  return { ok: true, perms: perms as Perms };
+}
+
+export function parsePermsJson(permsJson: string): Perms {
+  let parsedPerms: unknown;
+
+  try {
+    parsedPerms = JSON.parse(permsJson);
+  } catch {
+    throw new Error("Stored permissions are not valid JSON.");
+  }
+
+  const result = validatePerms(parsedPerms);
+  if (!result.ok) {
+    throw new Error(`Stored permissions are invalid: ${result.error}`);
+  }
+
+  return result.perms;
 }

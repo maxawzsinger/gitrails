@@ -29,7 +29,7 @@ import { endpoint as pullsListCommits } from "./endpoints/github.pulls.listCommi
 import { endpoint as issuesCreate } from "./endpoints/github.issues.create.js";
 import { endpoint as issuesList } from "./endpoints/github.issues.list.js";
 
-export const endpointRegistry: Record<string, EndpointObject> = {
+export const endpointRegistry = {
   "github.repos.get": reposGet,
   "github.repos.getContent": reposGetContent,
   "github.git.getRef": gitGetRef,
@@ -51,4 +51,4 @@ export const endpointRegistry: Record<string, EndpointObject> = {
   "github.pulls.listCommits": pullsListCommits,
   "github.issues.create": issuesCreate,
   "github.issues.list": issuesList,
-};
+} satisfies Record<string, EndpointObject>;
