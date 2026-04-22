@@ -74,6 +74,22 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
       res.status(400).json({ error: err.message });
       return;
     }
+
+    const octokitStatus = err instanceof Error ? (err as { status?: unknown }).status : undefined;
+    if (err instanceof Error && typeof octokitStatus === "number") {
+      res.status(octokitStatus).json({
+        ...Object.fromEntries(
+          Object.getOwnPropertyNames(err).map((key) => [
+            key,
+            (err as unknown as Record<string, unknown>)[key],
+          ]),
+        ),
+        name: err.name,
+        message: err.message,
+      });
+      return;
+    }
+
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(502).json({ error: `GitHub API error: ${message}` });
   }

@@ -19,7 +19,7 @@ const GITHUB_API_HEADERS = {
   Accept: "application/vnd.github+json",
   Authorization: `Bearer ${TEST_GITHUB_TOKEN}`,
   "Content-Type": "application/json",
-  "User-Agent": "proxy-github-e2e-test",
+  "User-Agent": "GitRails-e2e-test",
   "X-GitHub-Api-Version": "2022-11-28",
 } as const;
 type RetryUntilResult<T> = { done: boolean; value: T };
@@ -36,6 +36,18 @@ type ExecuteResponseBody<T> = {
   url: string;
   headers: Record<string, string>;
   data: T;
+};
+
+type ExecuteErrorBody = {
+  name: string;
+  message: string;
+  status: number;
+  response?: {
+    status: number;
+    data?: {
+      message?: string;
+    };
+  };
 };
 
 // GitHub file contents are base64 encoded and may include newlines in the payload.
@@ -94,7 +106,9 @@ function serializePayload(value: unknown): string {
   }
 }
 
-async function getResponsePayload(response: LoggedHttpResponse): Promise<string> {
+async function getResponsePayload(
+  response: LoggedHttpResponse,
+): Promise<string> {
   if (isFetchResponse(response)) {
     return serializePayload(await response.clone().text());
   }
@@ -104,7 +118,11 @@ async function getResponsePayload(response: LoggedHttpResponse): Promise<string>
   return serializePayload(response.body);
 }
 
-async function assertStatus(response: LoggedHttpResponse, expected: number, label: string): Promise<void> {
+async function assertStatus(
+  response: LoggedHttpResponse,
+  expected: number,
+  label: string,
+): Promise<void> {
   if (response.status === expected) {
     return;
   }
@@ -116,7 +134,11 @@ async function assertStatus(response: LoggedHttpResponse, expected: number, labe
   );
 }
 
-async function assertStatuses(response: LoggedHttpResponse, expected: number[], label: string): Promise<void> {
+async function assertStatuses(
+  response: LoggedHttpResponse,
+  expected: number[],
+  label: string,
+): Promise<void> {
   if (expected.includes(response.status)) {
     return;
   }
@@ -132,7 +154,7 @@ function getExecuteData<T>(body: unknown): T {
 }
 
 test(
-  "proxy github end-to-end",
+  "GitRails end-to-end",
   {
     timeout: 180_000,
   },
@@ -148,24 +170,34 @@ test(
       (await githubUserResponse.json()) as RestEndpointMethodTypes["users"]["getAuthenticated"]["response"]["data"];
 
     // Reuse the repo across runs; only create it the first time.
-    const existingRepoResponse = await fetch(`${GITHUB_API_BASE_URL}/repos/${githubUser.login}/${repo}`, {
-      method: "GET",
-      headers: GITHUB_API_HEADERS,
-    });
-    await assertStatuses(existingRepoResponse, [200, 404], "existingRepoResponse");
+    const existingRepoResponse = await fetch(
+      `${GITHUB_API_BASE_URL}/repos/${githubUser.login}/${repo}`,
+      {
+        method: "GET",
+        headers: GITHUB_API_HEADERS,
+      },
+    );
+    await assertStatuses(
+      existingRepoResponse,
+      [200, 404],
+      "existingRepoResponse",
+    );
     if (existingRepoResponse.status === 404) {
       await retryUntil(
         async () => {
-          const createRepoResponse = await fetch(`${GITHUB_API_BASE_URL}/user/repos`, {
-            method: "POST",
-            headers: GITHUB_API_HEADERS,
-            body: JSON.stringify({
-              name: repo,
-              description: "Disposable repo for proxy-github e2e tests.",
-              private: true,
-              auto_init: true,
-            }),
-          });
+          const createRepoResponse = await fetch(
+            `${GITHUB_API_BASE_URL}/user/repos`,
+            {
+              method: "POST",
+              headers: GITHUB_API_HEADERS,
+              body: JSON.stringify({
+                name: repo,
+                description: "Disposable repo for GitRails e2e tests.",
+                private: true,
+                auto_init: true,
+              }),
+            },
+          );
 
           return {
             done: createRepoResponse.status === 201,
@@ -215,12 +247,22 @@ test(
       const missingInstallationIdResponse = await request(app).get(
         "/githubTargets/github-app-callback",
       );
-      await assertStatus(missingInstallationIdResponse, 400, "missingInstallationIdResponse");
-      assert.equal(missingInstallationIdResponse.text, "Missing installation_id parameter.");
+      await assertStatus(
+        missingInstallationIdResponse,
+        400,
+        "missingInstallationIdResponse",
+      );
+      assert.equal(
+        missingInstallationIdResponse.text,
+        "Missing installation_id parameter.",
+      );
 
       const requestsWithoutAuth = await request(app).get("/requests");
       await assertStatus(requestsWithoutAuth, 401, "requestsWithoutAuth");
-      assert.equal(requestsWithoutAuth.body.error, "Missing Authorization header.");
+      assert.equal(
+        requestsWithoutAuth.body.error,
+        "Missing Authorization header.",
+      );
 
       const invalidKeyRequests = await request(app)
         .get("/requests")
@@ -239,7 +281,10 @@ test(
       );
       const ownerInstallation = ownerInstallationResponse.data;
       const ownerInstallationAccount = ownerInstallation.account;
-      assert(ownerInstallationAccount, `Expected installation account for ${owner}.`);
+      assert(
+        ownerInstallationAccount,
+        `Expected installation account for ${owner}.`,
+      );
       assert.equal(
         "login" in ownerInstallationAccount
           ? ownerInstallationAccount.login
@@ -291,7 +336,11 @@ test(
       const preservedAgentKeyAccess = await request(app)
         .get("/agentKeys/current")
         .set("Authorization", `Bearer ${revokedKeyBody.key}`);
-      await assertStatus(preservedAgentKeyAccess, 200, "preservedAgentKeyAccess");
+      await assertStatus(
+        preservedAgentKeyAccess,
+        200,
+        "preservedAgentKeyAccess",
+      );
 
       // After rotation, existing agent keys remain, and principal keys cannot impersonate an agent key.
       const initialKeysResponse = await request(app)
@@ -317,7 +366,11 @@ test(
       const principalKeyRequestsScope = await request(app)
         .get("/requests")
         .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(principalKeyRequestsScope, 403, "principalKeyRequestsScope");
+      await assertStatus(
+        principalKeyRequestsScope,
+        403,
+        "principalKeyRequestsScope",
+      );
       assert.equal(
         principalKeyRequestsScope.body.error,
         "This endpoint requires an agent key, not a principal key.",
@@ -376,17 +429,25 @@ test(
           owner,
           repo,
         });
-      await assertStatus(executeWithoutPermission, 403, "executeWithoutPermission");
+      await assertStatus(
+        executeWithoutPermission,
+        403,
+        "executeWithoutPermission",
+      );
 
       const invalidPermissionsResponse = await request(app)
         .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
         .set("Authorization", `Bearer ${principalKey}`)
         .send({
-            permissions: {
-              "github.fake.missing": {},
-            },
-          });
-      await assertStatus(invalidPermissionsResponse, 400, "invalidPermissionsResponse");
+          permissions: {
+            "github.fake.missing": {},
+          },
+        });
+      await assertStatus(
+        invalidPermissionsResponse,
+        400,
+        "invalidPermissionsResponse",
+      );
 
       const scopedPermissions = {
         "github.repos.getContent": {
@@ -403,7 +464,11 @@ test(
         .send({
           permissions: scopedPermissions,
         });
-      await assertStatus(scopedPermissionsResponse, 200, "scopedPermissionsResponse");
+      await assertStatus(
+        scopedPermissionsResponse,
+        200,
+        "scopedPermissionsResponse",
+      );
       assert.equal(scopedPermissionsResponse.body.ok, true);
 
       const regexDeniedResponse = await request(app)
@@ -512,7 +577,11 @@ test(
         .send({
           permissions: allPermissions,
         });
-      await assertStatus(fullPermissionsResponse, 200, "fullPermissionsResponse");
+      await assertStatus(
+        fullPermissionsResponse,
+        200,
+        "fullPermissionsResponse",
+      );
       assert.equal(fullPermissionsResponse.body.ok, true);
 
       // Exercise request validation separately from permission enforcement.
@@ -537,8 +606,15 @@ test(
           actionName: "github.repos.get",
           owner,
         });
-      await assertStatus(validationFailureResponse, 400, "validationFailureResponse");
-      assert.equal(validationFailureResponse.body.error, "Request validation failed.");
+      await assertStatus(
+        validationFailureResponse,
+        400,
+        "validationFailureResponse",
+      );
+      assert.equal(
+        validationFailureResponse.body.error,
+        "Request validation failed.",
+      );
 
       const invalidStringifiedJsonResponse = await request(app)
         .post("/execute")
@@ -574,6 +650,23 @@ test(
         "executeWithPrincipalKey",
       );
 
+      const missingContentResponse = await request(app)
+        .post("/execute")
+        .set("Authorization", `Bearer ${primaryAgentKey}`)
+        .send({
+          actionName: "github.repos.getContent",
+          owner,
+          repo,
+          path: `missing-${runId}.txt`,
+        });
+      await assertStatus(missingContentResponse, 404, "missingContentResponse");
+      const missingContentBody =
+        missingContentResponse.body as ExecuteErrorBody;
+      assert.equal(missingContentBody.name, "HttpError");
+      assert.equal(missingContentBody.status, 404);
+      assert.equal(missingContentBody.response?.status, 404);
+      assert.equal(missingContentBody.response?.data?.message, "Not Found");
+
       // Read the repo through the proxy and capture the default branch for later git operations.
       const repoResponse = await request(app)
         .post("/execute")
@@ -593,13 +686,23 @@ test(
       const repoBody = repoEnvelope.data;
       assert.equal(repoBody.full_name, `${owner}/${repo}`);
       const defaultBranch = repoBody.default_branch;
-      assert(defaultBranch, `Expected ${owner}/${repo} to have a default branch.`);
+      assert(
+        defaultBranch,
+        `Expected ${owner}/${repo} to have a default branch.`,
+      );
 
-      const readmeExistsResponse = await fetch(`${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/README.md`, {
-        method: "GET",
-        headers: GITHUB_API_HEADERS,
-      });
-      await assertStatuses(readmeExistsResponse, [200, 404], "readmeExistsResponse");
+      const readmeExistsResponse = await fetch(
+        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/README.md`,
+        {
+          method: "GET",
+          headers: GITHUB_API_HEADERS,
+        },
+      );
+      await assertStatuses(
+        readmeExistsResponse,
+        [200, 404],
+        "readmeExistsResponse",
+      );
       if (readmeExistsResponse.status === 404) {
         const createReadmeResponse = await fetch(
           `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/${encodeURIComponent("README.md")}`,
@@ -628,7 +731,10 @@ test(
         });
       await assertStatus(readmeResponse, 200, "readmeResponse");
       const readmeBody = getExecuteData<
-        Extract<RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"], { type: "file" }>
+        Extract<
+          RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
+          { type: "file" }
+        >
       >(readmeResponse.body);
       assert.equal(readmeBody.path, "README.md");
 
@@ -676,7 +782,9 @@ test(
       const baseTreeBody = getExecuteData<
         RestEndpointMethodTypes["git"]["getTree"]["response"]["data"]
       >(baseTreeResponse.body);
-      const readmeBlob = baseTreeBody.tree.find((item) => item.path === "README.md");
+      const readmeBlob = baseTreeBody.tree.find(
+        (item) => item.path === "README.md",
+      );
       assert(readmeBlob?.sha, "Expected README.md blob in the default tree.");
 
       const blobResponse = await request(app)
@@ -689,7 +797,9 @@ test(
           file_sha: readmeBlob.sha,
         });
       await assertStatus(blobResponse, 200, "blobResponse");
-      const blobBody = getExecuteData<{ sha: string; content: string }>(blobResponse.body);
+      const blobBody = getExecuteData<{ sha: string; content: string }>(
+        blobResponse.body,
+      );
       assert.equal(blobBody.sha, readmeBlob.sha);
       assert.match(decodeGitHubContent(blobBody.content), /# /);
 
@@ -721,7 +831,11 @@ test(
           headers: GITHUB_API_HEADERS,
         },
       );
-      await assertStatus(directCreatedFileResponse, 200, "directCreatedFileResponse");
+      await assertStatus(
+        directCreatedFileResponse,
+        200,
+        "directCreatedFileResponse",
+      );
       const directCreatedFile =
         (await directCreatedFileResponse.json()) as Extract<
           RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
@@ -733,14 +847,17 @@ test(
       );
 
       // Create a feature branch directly so later proxy git actions can build a commit on top of it.
-      const createRefResponse = await fetch(`${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/git/refs`, {
-        method: "POST",
-        headers: GITHUB_API_HEADERS,
-        body: JSON.stringify({
-          ref: `refs/heads/${branchName}`,
-          sha: defaultRefBody.object.sha,
-        }),
-      });
+      const createRefResponse = await fetch(
+        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/git/refs`,
+        {
+          method: "POST",
+          headers: GITHUB_API_HEADERS,
+          body: JSON.stringify({
+            ref: `refs/heads/${branchName}`,
+            sha: defaultRefBody.object.sha,
+          }),
+        },
+      );
       await assertStatus(createRefResponse, 201, "createRefResponse");
 
       // Build a commit manually through blob/tree/commit/update-ref to cover the lower-level git APIs.
@@ -755,7 +872,9 @@ test(
           encoding: "utf-8",
         });
       await assertStatus(createdBlobResponse, 200, "createdBlobResponse");
-      const createdBlobBody = getExecuteData<{ sha: string }>(createdBlobResponse.body);
+      const createdBlobBody = getExecuteData<{ sha: string }>(
+        createdBlobResponse.body,
+      );
 
       const createdTreeResponse = await request(app)
         .post("/execute")
@@ -775,7 +894,9 @@ test(
           ]),
         });
       await assertStatus(createdTreeResponse, 200, "createdTreeResponse");
-      const createdTreeBody = getExecuteData<{ sha: string }>(createdTreeResponse.body);
+      const createdTreeBody = getExecuteData<{ sha: string }>(
+        createdTreeResponse.body,
+      );
 
       const createdCommitResponse = await request(app)
         .post("/execute")
@@ -793,7 +914,9 @@ test(
           }),
         });
       await assertStatus(createdCommitResponse, 200, "createdCommitResponse");
-      const createdCommitBody = getExecuteData<{ sha: string }>(createdCommitResponse.body);
+      const createdCommitBody = getExecuteData<{ sha: string }>(
+        createdCommitResponse.body,
+      );
 
       const updateRefResponse = await request(app)
         .post("/execute")
@@ -819,7 +942,11 @@ test(
           headers: GITHUB_API_HEADERS,
         },
       );
-      await assertStatus(directBranchFileResponse, 200, "directBranchFileResponse");
+      await assertStatus(
+        directBranchFileResponse,
+        200,
+        "directBranchFileResponse",
+      );
       const directBranchFile =
         (await directBranchFileResponse.json()) as Extract<
           RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
@@ -906,10 +1033,10 @@ test(
           pull_number: pullNumber,
         });
       await assertStatus(pullFilesResponse, 200, "pullFilesResponse");
-      const pullFilesBody = getExecuteData<Array<{ filename: string }>>(pullFilesResponse.body);
-      assert(
-        pullFilesBody.some((file) => file.filename === branchFilePath),
+      const pullFilesBody = getExecuteData<Array<{ filename: string }>>(
+        pullFilesResponse.body,
       );
+      assert(pullFilesBody.some((file) => file.filename === branchFilePath));
 
       const pullCommitsResponse = await request(app)
         .post("/execute")
@@ -925,9 +1052,7 @@ test(
         pullCommitsResponse.body,
       );
       assert(
-        pullCommitsBody.some(
-          (commit) => commit.sha === createdCommitBody.sha,
-        ),
+        pullCommitsBody.some((commit) => commit.sha === createdCommitBody.sha),
       );
 
       const mergePullResponse = await request(app)
@@ -955,7 +1080,11 @@ test(
           headers: GITHUB_API_HEADERS,
         },
       );
-      await assertStatus(mergedPullDirectResponse, 200, "mergedPullDirectResponse");
+      await assertStatus(
+        mergedPullDirectResponse,
+        200,
+        "mergedPullDirectResponse",
+      );
       const mergedPullDirect =
         (await mergedPullDirectResponse.json()) as RestEndpointMethodTypes["pulls"]["get"]["response"]["data"];
       assert.ok(mergedPullDirect.merged_at);
@@ -967,7 +1096,11 @@ test(
           headers: GITHUB_API_HEADERS,
         },
       );
-      await assertStatus(mergedBranchFileResponse, 200, "mergedBranchFileResponse");
+      await assertStatus(
+        mergedBranchFileResponse,
+        200,
+        "mergedBranchFileResponse",
+      );
       const mergedBranchFile =
         (await mergedBranchFileResponse.json()) as Extract<
           RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
@@ -1121,14 +1254,18 @@ test(
         .put(`/agentKeys/${secondKeyBody.id}/permissions`)
         .set("Authorization", `Bearer ${principalKey}`)
         .send({
-            permissions: {
-              "github.repos.get": {
-                owner: `^${owner}$`,
-                repo: `^${repo}$`,
-              },
+          permissions: {
+            "github.repos.get": {
+              owner: `^${owner}$`,
+              repo: `^${repo}$`,
             },
-          });
-      await assertStatus(secondKeyPermissionsResponse, 200, "secondKeyPermissionsResponse");
+          },
+        });
+      await assertStatus(
+        secondKeyPermissionsResponse,
+        200,
+        "secondKeyPermissionsResponse",
+      );
 
       const secondKeyExecuteResponse = await request(app)
         .post("/execute")
@@ -1138,13 +1275,21 @@ test(
           owner,
           repo,
         });
-      await assertStatus(secondKeyExecuteResponse, 200, "secondKeyExecuteResponse");
+      await assertStatus(
+        secondKeyExecuteResponse,
+        200,
+        "secondKeyExecuteResponse",
+      );
 
       // The second key should only see its own single request.
       const secondKeyRequestsResponse = await request(app)
         .get("/requests")
         .set("Authorization", `Bearer ${secondKeyBody.key}`);
-      await assertStatus(secondKeyRequestsResponse, 200, "secondKeyRequestsResponse");
+      await assertStatus(
+        secondKeyRequestsResponse,
+        200,
+        "secondKeyRequestsResponse",
+      );
       const secondKeyRequestsBody = secondKeyRequestsResponse.body as {
         total: number;
         requests: Array<{
@@ -1162,7 +1307,11 @@ test(
       const allRequestsWithAgentKey = await request(app)
         .get("/requests/all")
         .set("Authorization", `Bearer ${secondKeyBody.key}`);
-      await assertStatus(allRequestsWithAgentKey, 403, "allRequestsWithAgentKey");
+      await assertStatus(
+        allRequestsWithAgentKey,
+        403,
+        "allRequestsWithAgentKey",
+      );
       assert.equal(
         allRequestsWithAgentKey.body.error,
         "This endpoint requires a principal key, not an agent key.",
@@ -1171,7 +1320,11 @@ test(
       const primaryKeyRequestsResponse = await request(app)
         .get("/requests")
         .set("Authorization", `Bearer ${primaryAgentKey}`);
-      await assertStatus(primaryKeyRequestsResponse, 200, "primaryKeyRequestsResponse");
+      await assertStatus(
+        primaryKeyRequestsResponse,
+        200,
+        "primaryKeyRequestsResponse",
+      );
       const primaryKeyRequestsBody = primaryKeyRequestsResponse.body as {
         total: number;
       };
@@ -1181,12 +1334,20 @@ test(
       const deleteMissingKeyResponse = await request(app)
         .delete("/agentKeys/not-a-real-key")
         .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(deleteMissingKeyResponse, 404, "deleteMissingKeyResponse");
+      await assertStatus(
+        deleteMissingKeyResponse,
+        404,
+        "deleteMissingKeyResponse",
+      );
 
       const deleteSecondKeyResponse = await request(app)
         .delete(`/agentKeys/${secondKeyBody.id}`)
         .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(deleteSecondKeyResponse, 200, "deleteSecondKeyResponse");
+      await assertStatus(
+        deleteSecondKeyResponse,
+        200,
+        "deleteSecondKeyResponse",
+      );
       assert.equal(deleteSecondKeyResponse.body.ok, true);
 
       const deletedSecondKeyAccess = await request(app)

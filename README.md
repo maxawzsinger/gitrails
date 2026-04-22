@@ -2,15 +2,15 @@
   <img src=".github/assets/logo.svg" alt="GitRails logo" width="480" />
 </p>
 
-BASE_URL=example.com
-
 # GitRails
 
 ## About
 
-This server exists to let humans grant unlimited agents very finely scoped access to a subset of the GitHub API.
+This server exists to let humans grant unlimited AI agents very finely scoped access to a subset of the GitHub API.
 
 For example, you can give an agent permission to read only certain subtrees of a repository, and another agent permission to open issues in certain repositories only.
+
+The server is hosted at $BASE_URL. To use it, install the GitRails GitHub app to get your principal key. Recommend to give this, and a link to this README.md, to a trusted agent to help you set up.
 
 Note: we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
 
@@ -18,13 +18,13 @@ Note: All agents share the same underlying installation token rate-limit budget.
 
 ### User Types
 
-End users (usually humans) install the GitRails app on a personal or org account and receive a principal key.
+End users install the GitRails app on a personal or org account and receive a principal key.
 
 Note: the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
 
-Principals (human or AI) authenticate with that principal key and handle administrative tasks, including provisioning and managing agent keys.
+Principals authenticate with a principal key and handle administrative tasks, including provisioning and managing agent keys.
 
-Agents (usually AI) authenticate with an agent key and call the proxied GitHub API endpoints. Each agent key is associated with its own permissions object that controls which GitHub API endpoints it can call and the parameters it can pass when calling.
+Agents authenticate with an agent key and call the proxied GitHub API endpoints. Each agent key is associated with its own permissions object that controls which GitHub API endpoints it can call and the parameters it can pass when calling.
 
 ### Agent Key Endpoints
 
@@ -55,7 +55,7 @@ Executes one allowed proxied GitHub action using the authenticated agent key.
 
 Required body: one of the TypeScript shapes below.
 
-Successful responses return the full Octokit response object, not just `data`: `{ status, url, headers, data }`.
+For `/execute`, successful GitHub calls return the full Octokit response object, and GitHub API failures return the full serialized Octokit error object with the upstream status code.
 
 If a field name starts with `stringified`, pass a JSON string, not a nested JSON value. Example: `stringifiedLabels: "[\"bug\",\"priority:high\"]"`. The proxy returns `400` if parsing that string does not produce valid JSON.
 
@@ -225,14 +225,14 @@ type GitHubPullsCreateBody = {
   actionName: "github.pulls.create"; // open a new pull request; example: "github.pulls.create"
   owner: string; // repo owner or org; example: "acme"
   repo: string; // repo name without .git; example: "monorepo"
-  title?: string; // optional, but required unless issue is provided; example: "Add docs"
+  title?: string; // optional in this TS shape, but the request is invalid unless at least one of title or issue is provided; example: "Add docs"
   head: string; // source branch, or owner:branch for cross-repo PRs; example: "feature/docs"
   head_repo?: string; // optional, required for some same-org cross-repo PRs; example: "monorepo-fork"
   base: string; // target branch; example: "main"
   body?: string; // optional PR body; example: "This updates the docs."
   maintainer_can_modify?: boolean; // optional allow maintainers to push to the head branch; example: true
   draft?: boolean; // optional create as a draft PR; example: false
-  issue?: number; // optional, but required unless title is provided; example: 123
+  issue?: number; // optional in this TS shape, but the request is invalid unless at least one of issue or title is provided; example: 123
 };
 ```
 
@@ -382,7 +382,7 @@ curl \
 ### Principal Key Endpoints
 
 `GET /agentKeys`
-Returns all agent keys owned by the authenticated GitHub target.
+Returns all agent keys.
 
 ```sh
 curl \
@@ -407,7 +407,7 @@ curl \
 ```
 
 `DELETE /agentKeys/:id`
-Deletes the specified agent key if it belongs to the authenticated GitHub target.
+Deletes the specified agent key.
 
 Required path params: `id` (agent key id).
 
@@ -443,7 +443,7 @@ curl \
 ```
 
 `GET /requests/all`
-Returns the request log across all agent keys owned by the authenticated GitHub target.
+Returns the request log across all agent keys.
 
 Required params: none.
 
@@ -572,7 +572,7 @@ curl \
 
 #### Principal Key Request History
 
-Use a principal key to inspect all requests for the GitHub target.
+Use a principal key to inspect all requests made by child agents.
 
 ```sh
 curl \
@@ -764,7 +764,13 @@ type Perms = {
 
 ### Access Model
 
-When an agent calls `/execute`, the proxy loads the permissions for that agent key. The request is allowed only if the action exists as a top-level permission key, and any regex specified for parameters match the corresponding parameter values in the request body provided by the agent (non-string parameters are cast to string before testing).
+When an agent calls `/execute`, the proxy loads the permissions for that agent key. The request is allowed only if the action exists as a top-level permission key, and any regex specified for parameters match the corresponding parameter values in the request body provided by the agent (non-string parameters are cast to string before testing). Permission matching is fail-closed for omitted params: if a constrained param is required by the action schema and the request omits it, request validation fails before permission matching; if a constrained param is optional and the request omits it, the proxy still runs the regex against `""` (empty string), not `"undefined"`, and does not skip the check.
+
+How the proxy does regex checks:
+
+```ts
+const paramIsAllowed = new RegExp(regex).test(paramValue);
+```
 
 ### Example Scenarios
 
@@ -786,7 +792,7 @@ Alice Agent calls `POST /execute` with this request body:
 {
   "actionName": "github.issues.create",
   "owner": "acme",
-  "repo": "proxy-github",
+  "repo": "GitRails",
   "title": "Bug report",
   "body": "Steps to reproduce..."
 }
@@ -812,7 +818,7 @@ Alice Agent calls `POST /execute` with this request body:
 {
   "actionName": "github.repos.deleteFile",
   "owner": "acme",
-  "repo": "proxy-github",
+  "repo": "GitRails",
   "path": "README.md",
   "message": "delete file",
   "sha": "abc123"
@@ -829,7 +835,7 @@ Behavior: rejected with `403`. `github.repos.deleteFile` is not a top-level perm
 {
   "github.issues.create": {
     "owner": "^acme$",
-    "repo": "^proxy-github$"
+    "repo": "^GitRails$"
   }
 }
 ```
@@ -842,7 +848,7 @@ Alice Agent calls `POST /execute` with this request body:
 {
   "actionName": "github.issues.create",
   "owner": "acme",
-  "repo": "proxy-github",
+  "repo": "GitRails",
   "title": "Bug report"
 }
 ```
@@ -857,7 +863,7 @@ Behavior: allowed. The proxy stringifies `owner` and `repo`, and both values mat
 {
   "github.issues.create": {
     "owner": "^acme$",
-    "repo": "^proxy-github$"
+    "repo": "^GitRails$"
   }
 }
 ```
@@ -870,7 +876,7 @@ Alice Agent calls `POST /execute` with this request body:
 {
   "actionName": "github.issues.create",
   "owner": "other-org",
-  "repo": "proxy-github",
+  "repo": "GitRails",
   "title": "Bug report"
 }
 ```

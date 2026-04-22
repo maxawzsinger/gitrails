@@ -17,3 +17,6 @@
 
 - Never type things as `any`.
   - If you do, call it out in chat.
+
+- Use `GitRails` as the project name everywhere.
+  - Do not introduce or preserve `gitrails`, `proxy-github`, or other legacy project-name variants in docs, examples, tests, or metadata unless a value is intentionally external and cannot be renamed.

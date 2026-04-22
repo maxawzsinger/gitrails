@@ -1,5 +1,5 @@
 {
-  "name": "proxy-github",
+  "name": "GitRails",
   "version": "1.0.0",
   "description": "Agent-first proxy service for the GitHub REST API",
   "type": "module",

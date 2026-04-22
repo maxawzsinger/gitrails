@@ -39,6 +39,13 @@ export function decrypt(packed: string): string {
 
 export function truncateForStorage(obj: unknown): string {
   const json = JSON.stringify(obj);
-  if (json.length <= MAX_BODY_LENGTH) return json;
-  return json.slice(0, MAX_BODY_LENGTH) + '..."[truncated]"}';
+  if (json.length <= MAX_BODY_LENGTH) {
+    return json;
+  }
+
+  return JSON.stringify({
+    truncated: true,
+    originalLength: json.length,
+    preview: json.slice(0, MAX_BODY_LENGTH),
+  });
 }
