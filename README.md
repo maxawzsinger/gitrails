@@ -2,302 +2,31 @@
   <img src=".github/assets/logo.svg" alt="GitRails logo" width="480" />
 </p>
 
+BASE_URL=example.com
+
 # GitRails
 
 ## About
 
-This server exists to let humans safely grant (AI) agents tightly scoped access to the GitHub API via managed keys and per-endpoint (and per-parameter) permissions.
+This server exists to let humans grant unlimited agents very finely scoped access to a subset of the GitHub API.
 
-Currently we
+For example, you can give an agent permission to read only certain subtrees of a repository, and another agent permission to open issues in certain repositories only.
 
-There are three user types:
+Note: we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
 
-End users (usually humans) install the Gitrails app on a personal or org account and receive a principal key.
+Note: All agents share the same underlying installation token rate-limit budget.
+
+### User Types
+
+End users (usually humans) install the GitRails app on a personal or org account and receive a principal key.
+
+Note: the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
 
 Principals (human or AI) authenticate with that principal key and handle administrative tasks, including provisioning and managing agent keys.
 
-Agents (usually AI) authenticate with an agent key and call the proxied GitHub API endpoints. Each agent key is associated with a permissions object of type:
+Agents (usually AI) authenticate with an agent key and call the proxied GitHub API endpoints. Each agent key is associated with its own permissions object that controls which GitHub API endpoints it can call and the parameters it can pass when calling.
 
-```ts
-type Perms = {
-  "github.repos.get"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-  };
-  "github.repos.getContent"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    path?: string; // regex
-    ref?: string; // regex
-  };
-  "github.git.getRef"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    ref?: string; // regex
-  };
-  "github.git.getCommit"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    commit_sha?: string; // regex
-  };
-  "github.git.getTree"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    tree_sha?: string; // regex
-    recursive?: string; // regex
-  };
-  "github.git.getBlob"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    file_sha?: string; // regex
-  };
-  "github.repos.createOrUpdateFileContents"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    path?: string; // regex
-    message?: string; // regex
-    content?: string; // regex
-    sha?: string; // regex
-    branch?: string; // regex
-    stringifiedCommitter?: string; // regex
-    stringifiedAuthor?: string; // regex
-  };
-  "github.repos.deleteFile"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    path?: string; // regex
-    message?: string; // regex
-    sha?: string; // regex
-    branch?: string; // regex
-    stringifiedCommitter?: string; // regex
-    stringifiedAuthor?: string; // regex
-  };
-  "github.git.createBlob"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    content?: string; // regex
-    encoding?: string; // regex
-  };
-  "github.git.createTree"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    stringifiedTree?: string; // regex
-    base_tree?: string; // regex
-  };
-  "github.git.createCommit"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    message?: string; // regex
-    tree?: string; // regex
-    stringifiedParents?: string; // regex
-    stringifiedAuthor?: string; // regex
-    stringifiedCommitter?: string; // regex
-    signature?: string; // regex
-  };
-  "github.git.updateRef"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    ref?: string; // regex
-    sha?: string; // regex
-    force?: string; // regex
-  };
-  "github.pulls.create"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    title?: string; // regex
-    head?: string; // regex
-    head_repo?: string; // regex
-    base?: string; // regex
-    body?: string; // regex
-    maintainer_can_modify?: string; // regex
-    draft?: string; // regex
-    issue?: string; // regex
-  };
-  "github.pulls.list"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    state?: string; // regex
-    head?: string; // regex
-    base?: string; // regex
-    sort?: string; // regex
-    direction?: string; // regex
-    per_page?: string; // regex
-    page?: string; // regex
-  };
-  "github.pulls.get"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    pull_number?: string; // regex
-  };
-  "github.pulls.update"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    pull_number?: string; // regex
-    title?: string; // regex
-    body?: string; // regex
-    state?: string; // regex
-    base?: string; // regex
-    maintainer_can_modify?: string; // regex
-  };
-  "github.pulls.merge"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    pull_number?: string; // regex
-    commit_title?: string; // regex
-    commit_message?: string; // regex
-    merge_method?: string; // regex
-    sha?: string; // regex
-  };
-  "github.pulls.listFiles"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    pull_number?: string; // regex
-    per_page?: string; // regex
-    page?: string; // regex
-  };
-  "github.pulls.listCommits"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    pull_number?: string; // regex
-    per_page?: string; // regex
-    page?: string; // regex
-  };
-  "github.issues.create"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    title?: string; // regex
-    body?: string; // regex
-    assignee?: string; // regex
-    milestone?: string; // regex
-    stringifiedLabels?: string; // regex
-    stringifiedAssignees?: string; // regex
-    type?: string; // regex
-  };
-  "github.issues.list"?: {
-    owner?: string; // regex
-    repo?: string; // regex
-    milestone?: string; // regex
-    state?: string; // regex
-    assignee?: string; // regex
-    type?: string; // regex
-    creator?: string; // regex
-    mentioned?: string; // regex
-    labels?: string; // regex
-    sort?: string; // regex
-    direction?: string; // regex
-    since?: string; // regex
-    per_page?: string; // regex
-    page?: string; // regex
-  };
-};
-```
-
-When an agent calls `/execute`, the proxy loads the permissions for that agent key. The request is allowed only if the action exists as a top-level permission key, and any configured param constraints match the stringified param values. This is how the proxy restricts which GitHub REST API actions and params the agent may use.
-
-Example scenarios:
-
-1. Action is present, with no param constraints: allowed.
-
-Alice Agent's permissions:
-
-```json
-{
-  "github.issues.create": {}
-}
-```
-
-Alice Agent calls POST /execute with this request body
-
-```json
-{
-  "actionName": "github.issues.create",
-  "owner": "acme",
-  "repo": "proxy-github",
-  "title": "Bug report",
-  "body": "Steps to reproduce..."
-}
-```
-
-Behavior: allowed. The action exists in the permissions object, and there are no param regex checks for this action.
-
-2. Action is missing: denied.
-
-Alice Agent's permissions:
-
-```json
-{
-  "github.issues.create": {}
-}
-```
-
-Alice Agent calls POST /execute with this request body
-
-```json
-{
-  "actionName": "github.repos.deleteFile",
-  "owner": "acme",
-  "repo": "proxy-github",
-  "path": "README.md",
-  "message": "delete file",
-  "sha": "abc123"
-}
-```
-
-Behavior: rejected with `403`. `github.repos.deleteFile` is not a top-level permission key.
-
-3. Action is present, and constrained params match: allowed.
-
-Alice Agent's permissions:
-
-```json
-{
-  "github.issues.create": {
-    "owner": "^acme$",
-    "repo": "^proxy-github$"
-  }
-}
-```
-
-Alice Agent calls POST /execute with this request body
-
-```json
-{
-  "actionName": "github.issues.create",
-  "owner": "acme",
-  "repo": "proxy-github",
-  "title": "Bug report"
-}
-```
-
-Behavior: allowed. The proxy stringifies `owner` and `repo`, then both values match their configured regex.
-
-4. Action is present, but a constrained param does not match: denied.
-
-Alice Agent's permissions:
-
-```json
-{
-  "github.issues.create": {
-    "owner": "^acme$",
-    "repo": "^proxy-github$"
-  }
-}
-```
-
-Alice Agent calls POST /execute with this request body
-
-```json
-{
-  "actionName": "github.issues.create",
-  "owner": "other-org",
-  "repo": "proxy-github",
-  "title": "Bug report"
-}
-```
-
-Behavior: rejected with `403`. The stringified `owner` value `other-org` does not match `^acme$`.
-
-Endpoints that require agent key:
+### Agent Key Endpoints
 
 `GET /agentKeys/current`
 Returns the authenticated agent key row, including its prefix and current permissions.
@@ -326,9 +55,11 @@ Executes one allowed proxied GitHub action using the authenticated agent key.
 
 Required body: one of the TypeScript shapes below.
 
+Successful responses return the full Octokit response object, not just `data`: `{ status, url, headers, data }`.
+
 If a field name starts with `stringified`, pass a JSON string, not a nested JSON value. Example: `stringifiedLabels: "[\"bug\",\"priority:high\"]"`. The proxy returns `400` if parsing that string does not produce valid JSON.
 
-### Repository actions
+#### Repository Actions
 
 `github.repos.get`
 
@@ -385,7 +116,7 @@ type GitHubReposDeleteFileBody = {
 };
 ```
 
-### Git database actions
+#### Git Database Actions
 
 `github.git.createBlob`
 
@@ -485,7 +216,7 @@ type GitHubGitUpdateRefBody = {
 };
 ```
 
-### Pull request actions
+#### Pull Request Actions
 
 `github.pulls.create`
 
@@ -590,7 +321,7 @@ type GitHubPullsMergeBody = {
 };
 ```
 
-### Issue actions
+#### Issue Actions
 
 `github.issues.create`
 
@@ -648,7 +379,7 @@ curl \
   }'
 ```
 
-principal key:
+### Principal Key Endpoints
 
 `GET /agentKeys`
 Returns all agent keys owned by the authenticated GitHub target.
@@ -724,15 +455,13 @@ curl \
   "$BASE_URL/requests/all?page=1&limit=50"
 ```
 
-It supports two credential types:
-
 ## Quickstart
 
 This example gives an agent read access to `foo/` and write access to `foo/bar/` only.
 
 ### 1. Install the GitHub App and receive a principal key
 
-Configure the GitHub App setup URL to point here:
+Configure the GitHub App setup URL to point here.
 
 ```text
 $BASE_URL/githubTargets/github-app-callback
@@ -759,7 +488,7 @@ Save the returned agent key. This is the credential the agent will use when call
 
 ### 3. Set permissions on the new agent key
 
-This example grants:
+This example grants the following permissions:
 
 - read access to `foo/`
 - write access to `foo/bar/`
@@ -831,7 +560,9 @@ curl \
 
 ### 6. Inspect request history
 
-Use an agent key to inspect only that agent's own request history:
+#### Agent Key Request History
+
+Use an agent key to inspect only that agent's own request history.
 
 ```sh
 curl \
@@ -839,7 +570,9 @@ curl \
   "$BASE_URL/requests"
 ```
 
-Use a principal key to inspect all requests for the GitHub target:
+#### Principal Key Request History
+
+Use a principal key to inspect all requests for the GitHub target.
 
 ```sh
 curl \
@@ -847,6 +580,301 @@ curl \
   "$BASE_URL/requests/all"
 ```
 
-## Self-hosting
+## Permissions
 
-For self-hosting, this proxy uses a GitHub App to identify itself to GitHub when it makes repo API calls. Create a GitHub App with `Contents`, `Pull requests`, `Issues`, and `Metadata` permissions, set the app's setup URL to `$BASE_URL/githubTargets/github-app-callback`, and install it on the target user or org repos. The proxy stores one `githubTargets` row per GitHub installation target, so reinstalling the app on the same target rotates that target's principal key while preserving the associated agent keys. Set `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `ENCRYPTION_KEY`, `DATABASE_PATH`, and `PORT`; `DATABASE_PATH` should be on persistent storage, and `ENCRYPTION_KEY` must remain stable across deploys.
+### Permission Object Type
+
+Each agent key is associated with its own permissions object.
+
+```ts
+type Regex = string;
+
+type Perms = {
+  "github.repos.get"?: {
+    owner?: Regex;
+    repo?: Regex;
+  };
+  "github.repos.getContent"?: {
+    owner?: Regex;
+    repo?: Regex;
+    path?: Regex;
+    ref?: Regex;
+  };
+  "github.git.getRef"?: {
+    owner?: Regex;
+    repo?: Regex;
+    ref?: Regex;
+  };
+  "github.git.getCommit"?: {
+    owner?: Regex;
+    repo?: Regex;
+    commit_sha?: Regex;
+  };
+  "github.git.getTree"?: {
+    owner?: Regex;
+    repo?: Regex;
+    tree_sha?: Regex;
+    recursive?: Regex;
+  };
+  "github.git.getBlob"?: {
+    owner?: Regex;
+    repo?: Regex;
+    file_sha?: Regex;
+  };
+  "github.repos.createOrUpdateFileContents"?: {
+    owner?: Regex;
+    repo?: Regex;
+    path?: Regex;
+    message?: Regex;
+    content?: Regex;
+    sha?: Regex;
+    branch?: Regex;
+    stringifiedCommitter?: Regex;
+    stringifiedAuthor?: Regex;
+  };
+  "github.repos.deleteFile"?: {
+    owner?: Regex;
+    repo?: Regex;
+    path?: Regex;
+    message?: Regex;
+    sha?: Regex;
+    branch?: Regex;
+    stringifiedCommitter?: Regex;
+    stringifiedAuthor?: Regex;
+  };
+  "github.git.createBlob"?: {
+    owner?: Regex;
+    repo?: Regex;
+    content?: Regex;
+    encoding?: Regex;
+  };
+  "github.git.createTree"?: {
+    owner?: Regex;
+    repo?: Regex;
+    stringifiedTree?: Regex;
+    base_tree?: Regex;
+  };
+  "github.git.createCommit"?: {
+    owner?: Regex;
+    repo?: Regex;
+    message?: Regex;
+    tree?: Regex;
+    stringifiedParents?: Regex;
+    stringifiedAuthor?: Regex;
+    stringifiedCommitter?: Regex;
+    signature?: Regex;
+  };
+  "github.git.updateRef"?: {
+    owner?: Regex;
+    repo?: Regex;
+    ref?: Regex;
+    sha?: Regex;
+    force?: Regex;
+  };
+  "github.pulls.create"?: {
+    owner?: Regex;
+    repo?: Regex;
+    title?: Regex;
+    head?: Regex;
+    head_repo?: Regex;
+    base?: Regex;
+    body?: Regex;
+    maintainer_can_modify?: Regex;
+    draft?: Regex;
+    issue?: Regex;
+  };
+  "github.pulls.list"?: {
+    owner?: Regex;
+    repo?: Regex;
+    state?: Regex;
+    head?: Regex;
+    base?: Regex;
+    sort?: Regex;
+    direction?: Regex;
+    per_page?: Regex;
+    page?: Regex;
+  };
+  "github.pulls.get"?: {
+    owner?: Regex;
+    repo?: Regex;
+    pull_number?: Regex;
+  };
+  "github.pulls.update"?: {
+    owner?: Regex;
+    repo?: Regex;
+    pull_number?: Regex;
+    title?: Regex;
+    body?: Regex;
+    state?: Regex;
+    base?: Regex;
+    maintainer_can_modify?: Regex;
+  };
+  "github.pulls.merge"?: {
+    owner?: Regex;
+    repo?: Regex;
+    pull_number?: Regex;
+    commit_title?: Regex;
+    commit_message?: Regex;
+    merge_method?: Regex;
+    sha?: Regex;
+  };
+  "github.pulls.listFiles"?: {
+    owner?: Regex;
+    repo?: Regex;
+    pull_number?: Regex;
+    per_page?: Regex;
+    page?: Regex;
+  };
+  "github.pulls.listCommits"?: {
+    owner?: Regex;
+    repo?: Regex;
+    pull_number?: Regex;
+    per_page?: Regex;
+    page?: Regex;
+  };
+  "github.issues.create"?: {
+    owner?: Regex;
+    repo?: Regex;
+    title?: Regex;
+    body?: Regex;
+    assignee?: Regex;
+    milestone?: Regex;
+    stringifiedLabels?: Regex;
+    stringifiedAssignees?: Regex;
+    type?: Regex;
+  };
+  "github.issues.list"?: {
+    owner?: Regex;
+    repo?: Regex;
+    milestone?: Regex;
+    state?: Regex;
+    assignee?: Regex;
+    type?: Regex;
+    creator?: Regex;
+    mentioned?: Regex;
+    labels?: Regex;
+    sort?: Regex;
+    direction?: Regex;
+    since?: Regex;
+    per_page?: Regex;
+    page?: Regex;
+  };
+};
+```
+
+### Access Model
+
+When an agent calls `/execute`, the proxy loads the permissions for that agent key. The request is allowed only if the action exists as a top-level permission key, and any regex specified for parameters match the corresponding parameter values in the request body provided by the agent (non-string parameters are cast to string before testing).
+
+### Example Scenarios
+
+#### 1. Action Is Present With No Param Constraints
+
+##### Permissions
+
+```json
+{
+  "github.issues.create": {}
+}
+```
+
+##### Request Body
+
+Alice Agent calls `POST /execute` with this request body:
+
+```json
+{
+  "actionName": "github.issues.create",
+  "owner": "acme",
+  "repo": "proxy-github",
+  "title": "Bug report",
+  "body": "Steps to reproduce..."
+}
+```
+
+Behavior: allowed. The action exists in the permissions object, and there are no param regex checks for this action.
+
+#### 2. Action Is Missing
+
+##### Permissions
+
+```json
+{
+  "github.issues.create": {}
+}
+```
+
+##### Request Body
+
+Alice Agent calls `POST /execute` with this request body:
+
+```json
+{
+  "actionName": "github.repos.deleteFile",
+  "owner": "acme",
+  "repo": "proxy-github",
+  "path": "README.md",
+  "message": "delete file",
+  "sha": "abc123"
+}
+```
+
+Behavior: rejected with `403`. `github.repos.deleteFile` is not a top-level permission key.
+
+#### 3. Action Is Present and Constrained Params Match
+
+##### Permissions
+
+```json
+{
+  "github.issues.create": {
+    "owner": "^acme$",
+    "repo": "^proxy-github$"
+  }
+}
+```
+
+##### Request Body
+
+Alice Agent calls `POST /execute` with this request body:
+
+```json
+{
+  "actionName": "github.issues.create",
+  "owner": "acme",
+  "repo": "proxy-github",
+  "title": "Bug report"
+}
+```
+
+Behavior: allowed. The proxy stringifies `owner` and `repo`, and both values match their configured regex.
+
+#### 4. Action Is Present but a Constrained Param Does Not Match
+
+##### Permissions
+
+```json
+{
+  "github.issues.create": {
+    "owner": "^acme$",
+    "repo": "^proxy-github$"
+  }
+}
+```
+
+##### Request Body
+
+Alice Agent calls `POST /execute` with this request body:
+
+```json
+{
+  "actionName": "github.issues.create",
+  "owner": "other-org",
+  "repo": "proxy-github",
+  "title": "Bug report"
+}
+```
+
+Behavior: rejected with `403`. The stringified `owner` value `other-org` does not match `^acme$`.
+
+Remember, only the principal can modify the permissions object for an agent.

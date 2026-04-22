@@ -31,6 +31,13 @@ type LoggedHttpResponse =
       body?: unknown;
     };
 
+type ExecuteResponseBody<T> = {
+  status: number;
+  url: string;
+  headers: Record<string, string>;
+  data: T;
+};
+
 // GitHub file contents are base64 encoded and may include newlines in the payload.
 function decodeGitHubContent(content: string): string {
   return Buffer.from(content.replace(/\n/g, ""), "base64").toString("utf8");
@@ -118,6 +125,10 @@ async function assertStatuses(response: LoggedHttpResponse, expected: number[], 
     expected.includes(response.status),
     `${label} failed with status ${response.status}. Expected one of ${expected.join(", ")}. Payload: ${payload}`,
   );
+}
+
+function getExecuteData<T>(body: unknown): T {
+  return (body as ExecuteResponseBody<T>).data;
 }
 
 test(
@@ -573,7 +584,13 @@ test(
           repo,
         });
       await assertStatus(repoResponse, 200, "repoResponse");
-      const repoBody = repoResponse.body as RestEndpointMethodTypes["repos"]["get"]["response"]["data"];
+      const repoEnvelope = repoResponse.body as ExecuteResponseBody<
+        RestEndpointMethodTypes["repos"]["get"]["response"]["data"]
+      >;
+      assert.equal(repoEnvelope.status, 200);
+      assert.equal(typeof repoEnvelope.url, "string");
+      assert.equal(typeof repoEnvelope.headers["content-type"], "string");
+      const repoBody = repoEnvelope.data;
       assert.equal(repoBody.full_name, `${owner}/${repo}`);
       const defaultBranch = repoBody.default_branch;
       assert(defaultBranch, `Expected ${owner}/${repo} to have a default branch.`);
@@ -610,8 +627,9 @@ test(
           path: "README.md",
         });
       await assertStatus(readmeResponse, 200, "readmeResponse");
-      const readmeBody =
-        readmeResponse.body as Extract<RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"], { type: "file" }>;
+      const readmeBody = getExecuteData<
+        Extract<RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"], { type: "file" }>
+      >(readmeResponse.body);
       assert.equal(readmeBody.path, "README.md");
 
       const defaultRefResponse = await request(app)
@@ -624,7 +642,9 @@ test(
           ref: `heads/${defaultBranch}`,
         });
       await assertStatus(defaultRefResponse, 200, "defaultRefResponse");
-      const defaultRefBody = defaultRefResponse.body as RestEndpointMethodTypes["git"]["getRef"]["response"]["data"];
+      const defaultRefBody = getExecuteData<
+        RestEndpointMethodTypes["git"]["getRef"]["response"]["data"]
+      >(defaultRefResponse.body);
       assert.equal(defaultRefBody.ref, `refs/heads/${defaultBranch}`);
 
       const baseCommitResponse = await request(app)
@@ -637,7 +657,9 @@ test(
           commit_sha: defaultRefBody.object.sha,
         });
       await assertStatus(baseCommitResponse, 200, "baseCommitResponse");
-      const baseCommitBody = baseCommitResponse.body as RestEndpointMethodTypes["git"]["getCommit"]["response"]["data"];
+      const baseCommitBody = getExecuteData<
+        RestEndpointMethodTypes["git"]["getCommit"]["response"]["data"]
+      >(baseCommitResponse.body);
       assert.equal(baseCommitBody.sha, defaultRefBody.object.sha);
 
       const baseTreeResponse = await request(app)
@@ -651,7 +673,9 @@ test(
           recursive: "1",
         });
       await assertStatus(baseTreeResponse, 200, "baseTreeResponse");
-      const baseTreeBody = baseTreeResponse.body as RestEndpointMethodTypes["git"]["getTree"]["response"]["data"];
+      const baseTreeBody = getExecuteData<
+        RestEndpointMethodTypes["git"]["getTree"]["response"]["data"]
+      >(baseTreeResponse.body);
       const readmeBlob = baseTreeBody.tree.find((item) => item.path === "README.md");
       assert(readmeBlob?.sha, "Expected README.md blob in the default tree.");
 
@@ -665,7 +689,7 @@ test(
           file_sha: readmeBlob.sha,
         });
       await assertStatus(blobResponse, 200, "blobResponse");
-      const blobBody = blobResponse.body as { sha: string; content: string };
+      const blobBody = getExecuteData<{ sha: string; content: string }>(blobResponse.body);
       assert.equal(blobBody.sha, readmeBlob.sha);
       assert.match(decodeGitHubContent(blobBody.content), /# /);
 
@@ -682,12 +706,12 @@ test(
           content: `proxy create ${runId}`,
         });
       await assertStatus(createFileResponse, 200, "createFileResponse");
-      const createFileBody = createFileResponse.body as {
+      const createFileBody = getExecuteData<{
         content: {
           sha: string;
           path: string;
         };
-      };
+      }>(createFileResponse.body);
       assert.equal(createFileBody.content.path, repoFilePath);
 
       const directCreatedFileResponse = await fetch(
@@ -731,8 +755,7 @@ test(
           encoding: "utf-8",
         });
       await assertStatus(createdBlobResponse, 200, "createdBlobResponse");
-
-      const createdBlobBody = createdBlobResponse.body as { sha: string };
+      const createdBlobBody = getExecuteData<{ sha: string }>(createdBlobResponse.body);
 
       const createdTreeResponse = await request(app)
         .post("/execute")
@@ -752,8 +775,7 @@ test(
           ]),
         });
       await assertStatus(createdTreeResponse, 200, "createdTreeResponse");
-
-      const createdTreeBody = createdTreeResponse.body as { sha: string };
+      const createdTreeBody = getExecuteData<{ sha: string }>(createdTreeResponse.body);
 
       const createdCommitResponse = await request(app)
         .post("/execute")
@@ -771,8 +793,7 @@ test(
           }),
         });
       await assertStatus(createdCommitResponse, 200, "createdCommitResponse");
-
-      const createdCommitBody = createdCommitResponse.body as { sha: string };
+      const createdCommitBody = getExecuteData<{ sha: string }>(createdCommitResponse.body);
 
       const updateRefResponse = await request(app)
         .post("/execute")
@@ -785,7 +806,9 @@ test(
           sha: createdCommitBody.sha,
         });
       await assertStatus(updateRefResponse, 200, "updateRefResponse");
-      const updateRefBody = updateRefResponse.body as RestEndpointMethodTypes["git"]["updateRef"]["response"]["data"];
+      const updateRefBody = getExecuteData<
+        RestEndpointMethodTypes["git"]["updateRef"]["response"]["data"]
+      >(updateRefResponse.body);
       assert.equal(updateRefBody.object.sha, createdCommitBody.sha);
 
       // Confirm the branch file is visible from GitHub on the new branch.
@@ -821,7 +844,9 @@ test(
           base: defaultBranch,
         });
       await assertStatus(createdPullResponse, 200, "createdPullResponse");
-      const createdPullBody = createdPullResponse.body as RestEndpointMethodTypes["pulls"]["create"]["response"]["data"];
+      const createdPullBody = getExecuteData<
+        RestEndpointMethodTypes["pulls"]["create"]["response"]["data"]
+      >(createdPullResponse.body);
       const pullNumber = createdPullBody.number;
 
       const listPullsResponse = await request(app)
@@ -834,7 +859,9 @@ test(
           state: "open",
         });
       await assertStatus(listPullsResponse, 200, "listPullsResponse");
-      const listPullsBody = listPullsResponse.body as RestEndpointMethodTypes["pulls"]["list"]["response"]["data"];
+      const listPullsBody = getExecuteData<
+        RestEndpointMethodTypes["pulls"]["list"]["response"]["data"]
+      >(listPullsResponse.body);
       assert(listPullsBody.some((pull) => pull.number === pullNumber));
 
       const getPullResponse = await request(app)
@@ -847,7 +874,9 @@ test(
           pull_number: pullNumber,
         });
       await assertStatus(getPullResponse, 200, "getPullResponse");
-      const getPullBody = getPullResponse.body as RestEndpointMethodTypes["pulls"]["get"]["response"]["data"];
+      const getPullBody = getExecuteData<
+        RestEndpointMethodTypes["pulls"]["get"]["response"]["data"]
+      >(getPullResponse.body);
       assert.equal(getPullBody.title, pullTitle);
 
       const updatedPullResponse = await request(app)
@@ -862,7 +891,9 @@ test(
           body: `updated ${runId}`,
         });
       await assertStatus(updatedPullResponse, 200, "updatedPullResponse");
-      const updatedPullBody = updatedPullResponse.body as RestEndpointMethodTypes["pulls"]["update"]["response"]["data"];
+      const updatedPullBody = getExecuteData<
+        RestEndpointMethodTypes["pulls"]["update"]["response"]["data"]
+      >(updatedPullResponse.body);
       assert.equal(updatedPullBody.title, `${pullTitle} updated`);
 
       const pullFilesResponse = await request(app)
@@ -875,7 +906,7 @@ test(
           pull_number: pullNumber,
         });
       await assertStatus(pullFilesResponse, 200, "pullFilesResponse");
-      const pullFilesBody = pullFilesResponse.body as Array<{ filename: string }>;
+      const pullFilesBody = getExecuteData<Array<{ filename: string }>>(pullFilesResponse.body);
       assert(
         pullFilesBody.some((file) => file.filename === branchFilePath),
       );
@@ -890,7 +921,9 @@ test(
           pull_number: pullNumber,
         });
       await assertStatus(pullCommitsResponse, 200, "pullCommitsResponse");
-      const pullCommitsBody = pullCommitsResponse.body as Array<{ sha: string }>;
+      const pullCommitsBody = getExecuteData<Array<{ sha: string }>>(
+        pullCommitsResponse.body,
+      );
       assert(
         pullCommitsBody.some(
           (commit) => commit.sha === createdCommitBody.sha,
@@ -908,10 +941,10 @@ test(
           merge_method: "merge",
         });
       await assertStatus(mergePullResponse, 200, "mergePullResponse");
-      const mergePullBody = mergePullResponse.body as {
+      const mergePullBody = getExecuteData<{
         merged: boolean;
         sha: string;
-      };
+      }>(mergePullResponse.body);
       assert.equal(mergePullBody.merged, true);
 
       // Verify the merge through GitHub rather than trusting the proxy response alone.
@@ -957,7 +990,9 @@ test(
           body: `issue body ${runId}`,
         });
       await assertStatus(createdIssueResponse, 200, "createdIssueResponse");
-      const createdIssueBody = createdIssueResponse.body as RestEndpointMethodTypes["issues"]["create"]["response"]["data"];
+      const createdIssueBody = getExecuteData<
+        RestEndpointMethodTypes["issues"]["create"]["response"]["data"]
+      >(createdIssueResponse.body);
       const issueNumber = createdIssueBody.number;
 
       const listIssuesBody = await retryUntil(
@@ -972,8 +1007,9 @@ test(
               state: "open",
             });
           await assertStatus(listIssuesResponse, 200, "listIssuesResponse");
-          const body =
-            listIssuesResponse.body as RestEndpointMethodTypes["issues"]["listForRepo"]["response"]["data"];
+          const body = getExecuteData<
+            RestEndpointMethodTypes["issues"]["listForRepo"]["response"]["data"]
+          >(listIssuesResponse.body);
           return {
             done: body.some((issue) => issue.number === issueNumber),
             value: body,
@@ -1014,11 +1050,12 @@ test(
         });
       await assertStatus(contentBeforeDelete, 200, "contentBeforeDelete");
 
-      const contentBeforeDeleteBody =
-        contentBeforeDelete.body as Extract<
+      const contentBeforeDeleteBody = getExecuteData<
+        Extract<
           RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
           { type: "file" }
-        >;
+        >
+      >(contentBeforeDelete.body);
 
       const deleteFileResponse = await request(app)
         .post("/execute")
