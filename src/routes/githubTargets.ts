@@ -7,6 +7,15 @@ import { db } from "../db.js";
 
 export const githubTargetsRouter = Router();
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 type GitHubAccount =
   | { id: number; login: string }
   | { id: number; slug: string }
@@ -89,10 +98,10 @@ githubTargetsRouter.get("/github-app-callback", async (req, res) => {
   </head>
   <body>
     <h1>GitHub App setup complete</h1>
-    <p>${accountMessage}</p>
-    <p>${recoveryMessage}</p>
+    <p>${escapeHtml(accountMessage)}</p>
+    <p>${escapeHtml(recoveryMessage)}</p>
     <p>This principal key is shown once. Store it somewhere safe.</p>
-    <pre><code>${principalKeyPlaintext}</code></pre>
+    <pre><code>${escapeHtml(principalKeyPlaintext)}</code></pre>
   </body>
 </html>`);
   } catch (error: unknown) {

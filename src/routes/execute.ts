@@ -1,20 +1,25 @@
 import { Router } from "express";
 import { v4 as uuid } from "uuid";
 import { db } from "../db.js";
+import type { EndpointObject } from "../lib/endpointTypes.js";
 import { requireAgentKey } from "../middleware/auth.js";
 import { endpointRegistry } from "../lib/endpointRegistry.js";
-import type { EndpointObject } from "../lib/endpointTypes.js";
 import type { ActionName } from "../lib/permissionTypes.js";
 import { encrypt, truncateForStorage } from "../lib/encryption.js";
 import { EndpointRequestError } from "../lib/stringifiedJson.js";
 
 export const executeRouter = Router();
 
+// Upper bound on param values tested against a permission regex. Bounds the
+// worst-case runtime of a catastrophic-backtracking pattern to protect the
+// event loop from a ReDoS.
+const MAX_CONSTRAINED_PARAM_LENGTH = 256;
+
 executeRouter.post("/", requireAgentKey, async (req, res) => {
   const body = req.body as Record<string, unknown>;
-  const actionName = body.actionName as string | undefined;
+  const actionName = body.actionName;
 
-  if (!actionName || typeof actionName !== "string") {
+  if (typeof actionName !== "string" || actionName.length === 0) {
     res.status(400).json({ error: "actionName is required." });
     return;
   }
@@ -30,7 +35,12 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
   // Schema validation
   const parsed = endpoint.requestSchema.safeParse(body);
   if (!parsed.success) {
-    res.status(400).json({ error: "Request validation failed.", details: parsed.error.issues });
+    res
+      .status(400)
+      .json({
+        error: "Request validation failed.",
+        details: parsed.error.issues,
+      });
     return;
   }
 
@@ -38,13 +48,28 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
   const perms = req.authedAgentKey!.permissions;
   const actionPerms = perms[typedActionName];
   if (!actionPerms) {
-    res.status(403).json({ error: `No permission for action "${actionName}".` });
+    res
+      .status(403)
+      .json({ error: `No permission for action "${actionName}".` });
     return;
   }
 
   // Regex constraint check
   for (const [paramName, regex] of Object.entries(actionPerms)) {
-    const paramValue = String((parsed.data as Record<string, unknown>)[paramName] ?? "");
+    const rawValue = (parsed.data as Record<string, unknown>)[paramName];
+    if (rawValue === undefined || rawValue === null) {
+      res.status(403).json({
+        error: `Parameter "${paramName}" is required because the agent key's permissions constrain it.`,
+      });
+      return;
+    }
+    const paramValue = String(rawValue);
+    if (paramValue.length > MAX_CONSTRAINED_PARAM_LENGTH) {
+      res.status(400).json({
+        error: `Parameter "${paramName}" exceeds maximum length of ${MAX_CONSTRAINED_PARAM_LENGTH} characters for constrained params.`,
+      });
+      return;
+    }
     if (!new RegExp(regex).test(paramValue)) {
       res.status(403).json({
         error: `Parameter "${paramName}" value "${paramValue}" does not match constraint /${regex}/.`,
@@ -59,13 +84,13 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
 
     // Log request + response
     db.prepare(
-      "INSERT INTO requests (id, agentKeyId, encryptedRequest, encryptedResponse, createdAt) VALUES (?, ?, ?, ?, ?)"
+      "INSERT INTO requests (id, agentKeyId, encryptedRequest, encryptedResponse, createdAt) VALUES (?, ?, ?, ?, ?)",
     ).run(
       uuid(),
       req.authedAgentKey!.agentKeyId,
       encrypt(truncateForStorage(parsed.data)),
       encrypt(truncateForStorage(result)),
-      Date.now()
+      Date.now(),
     );
 
     res.json(result);
@@ -75,17 +100,26 @@ executeRouter.post("/", requireAgentKey, async (req, res) => {
       return;
     }
 
-    const octokitStatus = err instanceof Error ? (err as { status?: unknown }).status : undefined;
-    if (err instanceof Error && typeof octokitStatus === "number") {
-      res.status(octokitStatus).json({
-        ...Object.fromEntries(
-          Object.getOwnPropertyNames(err).map((key) => [
-            key,
-            (err as unknown as Record<string, unknown>)[key],
-          ]),
-        ),
+    if (
+      err instanceof Error &&
+      "status" in err &&
+      typeof err.status === "number"
+    ) {
+      // Only forward fields that are safe to echo back. Avoid leaking
+      // request/response headers (may include the installation token) or
+      // other internal Octokit state.
+      const response =
+        "response" in err &&
+        typeof err.response === "object" &&
+        err.response !== null &&
+        "data" in err.response
+          ? { data: err.response.data }
+          : undefined;
+      res.status(err.status).json({
         name: err.name,
         message: err.message,
+        status: err.status,
+        response,
       });
       return;
     }

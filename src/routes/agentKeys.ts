@@ -8,7 +8,7 @@ import { parsePermsJson, validatePerms } from "../lib/validatePerms.js";
 import { requireAgentKey, requirePrincipalKey } from "../middleware/auth.js";
 
 export const agentKeysRouter = Router();
-const AGENT_KEY_PREFIX_REGEX = /^[a-z_]+$/;
+const AGENT_KEY_PREFIX_REGEX = /^[a-z0-9_]+$/;
 
 // List keys for the authenticated user
 agentKeysRouter.get("/", requirePrincipalKey, (req, res) => {
@@ -80,7 +80,7 @@ agentKeysRouter.post("/", requirePrincipalKey, (req, res) => {
   if (!AGENT_KEY_PREFIX_REGEX.test(trimmedPrefix)) {
     res.status(400).json({
       error:
-        "prefix must contain only lowercase letters and underscores (a-z, _).",
+        "prefix must contain only lowercase letters, digits, and underscores (a-z, 0-9, _).",
     });
     return;
   }

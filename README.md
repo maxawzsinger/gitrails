@@ -10,7 +10,9 @@ This server exists to let humans grant unlimited AI agents very finely scoped ac
 
 For example, you can give an agent permission to read only certain subtrees of a repository, and another agent permission to open issues in certain repositories only.
 
-The server is hosted at $BASE_URL. To use it, install the GitRails GitHub app to get your principal key. Recommend to give this, and a link to this README.md, to a trusted agent to help you set up.
+It is built for agents that can make arbitrary network calls (probably by executing bash scripts). To interact with the server, the agent needs only to know of the server endpoints, and authenticate itself with an API key.
+
+The server is hosted at $BASE_URL. To use it, install the GitRails GitHub app to get your principal key. It is recommended to give key, and a link to this README.md, to a trusted agent to help you set up or provide clarifications.
 
 Note: we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
 
@@ -18,7 +20,7 @@ Note: All agents share the same underlying installation token rate-limit budget.
 
 ### User Types
 
-End users install the GitRails app on a personal or org account and receive a principal key.
+End users install the GitRails app on a personal or organisation account and receive a principal key.
 
 Note: the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
 

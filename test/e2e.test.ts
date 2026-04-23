@@ -1,1362 +1,919 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import type { RestEndpointMethodTypes } from "@octokit/plugin-rest-endpoint-methods";
+import { fileURLToPath } from "node:url";
+import { config as loadEnv } from "dotenv";
 import request from "supertest";
-import {
-  ROOT_DIR,
-  TEST_DATABASE_PATH,
-  TEST_GITHUB_EMAIL,
-  TEST_GITHUB_REPO,
-  TEST_GITHUB_TOKEN,
-} from "./config.js";
 
-const GITHUB_API_BASE_URL = "https://api.github.com";
-// Keep the raw GitHub calls explicit so each verification reads like a live API interaction.
-const GITHUB_API_HEADERS = {
-  Accept: "application/vnd.github+json",
-  Authorization: `Bearer ${TEST_GITHUB_TOKEN}`,
-  "Content-Type": "application/json",
-  "User-Agent": "GitRails-e2e-test",
-  "X-GitHub-Api-Version": "2022-11-28",
-} as const;
-type RetryUntilResult<T> = { done: boolean; value: T };
-type LoggedHttpResponse =
-  | Response
-  | {
-      status: number;
-      text?: string;
-      body?: unknown;
-    };
+// -----------------------------------------------------------------------------
+// Env setup. Throw early if required vars are missing.
+// -----------------------------------------------------------------------------
 
-type ExecuteResponseBody<T> = {
-  status: number;
-  url: string;
-  headers: Record<string, string>;
-  data: T;
-};
+const ROOT_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+loadEnv({ path: path.join(ROOT_DIR, ".env") });
+loadEnv({ path: path.join(ROOT_DIR, ".test.env"), override: true });
 
-type ExecuteErrorBody = {
-  name: string;
-  message: string;
-  status: number;
-  response?: {
-    status: number;
-    data?: {
-      message?: string;
-    };
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required env var: ${name}`);
+  }
+  return value;
+}
+
+for (const key of [
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "ENCRYPTION_KEY",
+  "ENCRYPTION_SALT",
+  "PORT",
+] as const) {
+  required(key);
+}
+
+const E2E_OWNER = required("E2E_OWNER");
+const E2E_REPO = required("E2E_REPO");
+const E2E_BASE_BRANCH = required("E2E_BASE_BRANCH");
+const E2E_INSTALLATION_ID = Number.parseInt(
+  required("E2E_INSTALLATION_ID"),
+  10,
+);
+if (!Number.isSafeInteger(E2E_INSTALLATION_ID) || E2E_INSTALLATION_ID <= 0) {
+  throw new Error("E2E_INSTALLATION_ID must be a positive integer.");
+}
+
+// Point DATABASE_PATH at a fresh temp file before src/db.ts initializes.
+const TEMP_DB_PATH = path.join(
+  os.tmpdir(),
+  `gitrails-e2e-${crypto.randomBytes(4).toString("hex")}.sqlite`,
+);
+process.env.DATABASE_PATH = TEMP_DB_PATH;
+
+const { app: expressApp } = await import("../src/app.js");
+const { db } = await import("../src/db.js");
+const { app: githubAppClient } = await import("../src/lib/octokit.js");
+const { decrypt } = await import("../src/lib/encryption.js");
+
+const installationOctokit =
+  await githubAppClient.getInstallationOctokit(E2E_INSTALLATION_ID);
+
+// -----------------------------------------------------------------------------
+// Shared helpers.
+// -----------------------------------------------------------------------------
+
+function log(message: string): void {
+  const ts = new Date().toISOString().slice(11, 23);
+  process.stderr.write(`[e2e ${ts}] ${message}\n`);
+}
+
+type StepCtx = { test: (name: string, fn: () => Promise<void>) => Promise<void> };
+
+async function step(
+  t: StepCtx,
+  name: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  await t.test(name, async () => {
+    log(`STEP > ${name}`);
+    const started = Date.now();
+    try {
+      await fn();
+      log(`STEP ok ${name} (${Date.now() - started}ms)`);
+    } catch (err) {
+      log(
+        `STEP FAIL ${name} (${Date.now() - started}ms): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
+  });
+}
+
+const runId = crypto.randomBytes(4).toString("hex");
+const HEAD_BRANCH = `gitrails-e2e-${runId}-head`;
+const BASE_BRANCH = `gitrails-e2e-${runId}-base`;
+const FILE_PATH = `gitrails-e2e/${runId}.txt`;
+const EXTRA_FILE_PATH = `gitrails-e2e/${runId}-extra.txt`;
+const ISSUE_TITLE = `gitrails e2e issue ${runId}`;
+
+type ExecBody = Record<string, unknown> & { actionName: string };
+type SupertestResponse = Awaited<
+  ReturnType<ReturnType<typeof request>["get"]>
+>;
+
+function bearer(key: string) {
+  const authorize = <T extends { set: (name: string, value: string) => T }>(
+    req: T,
+  ) => req.set("Authorization", `Bearer ${key}`);
+  return {
+    get: (p: string) => authorize(request(expressApp).get(p)),
+    post: (p: string) => authorize(request(expressApp).post(p)),
+    put: (p: string) => authorize(request(expressApp).put(p)),
+    delete: (p: string) => authorize(request(expressApp).delete(p)),
   };
-};
-
-// GitHub file contents are base64 encoded and may include newlines in the payload.
-function decodeGitHubContent(content: string): string {
-  return Buffer.from(content.replace(/\n/g, ""), "base64").toString("utf8");
 }
 
-// The GitHub API is eventually consistent around repo creation and deletion.
-async function retryUntil<T>(
-  action: (attempt: number) => Promise<RetryUntilResult<T>>,
-  options: {
-    attempts: number;
-    delayMs: number;
-    getFailureMessage: (value: T) => string | Promise<string>;
-  },
-): Promise<T> {
-  let lastValue: T | undefined;
+let principalExecSuccess = 0;
+// Tracks per-agent-key /execute 200 responses so /requests totals can be
+// asserted precisely. Primary agent key is added once it is created.
+const agentExecSuccess = new Map<string, number>();
 
-  for (let attempt = 0; attempt < options.attempts; attempt += 1) {
-    const result = await action(attempt);
-    lastValue = result.value;
-
-    if (result.done) {
-      return result.value;
-    }
-
-    if (attempt < options.attempts - 1) {
-      await new Promise((resolve) => {
-        setTimeout(resolve, options.delayMs);
-      });
-    }
+async function exec(
+  agentKey: string,
+  body: ExecBody,
+): Promise<SupertestResponse> {
+  log(`exec -> ${body.actionName}`);
+  const res = await request(expressApp)
+    .post("/execute")
+    .set("Authorization", `Bearer ${agentKey}`)
+    .send(body);
+  log(`exec <- ${body.actionName} status=${res.status}`);
+  if (res.status === 200) {
+    principalExecSuccess += 1;
+    agentExecSuccess.set(agentKey, (agentExecSuccess.get(agentKey) ?? 0) + 1);
   }
-
-  if (lastValue === undefined) {
-    throw new Error("retryUntil() requires at least one attempt.");
-  }
-
-  throw new Error(await options.getFailureMessage(lastValue));
+  return res;
 }
 
-function isFetchResponse(response: LoggedHttpResponse): response is Response {
-  return typeof (response as Response).clone === "function";
+function decodeBase64Utf8(value: string): string {
+  return Buffer.from(value.replace(/\n/g, ""), "base64").toString("utf8");
 }
 
-function serializePayload(value: unknown): string {
-  if (value === undefined || value === null || value === "") {
-    return "<empty>";
+// Every declared action in the endpoint registry. Kept inline to avoid
+// importing registry internals from the test file.
+const ALL_ACTION_NAMES = [
+  "github.repos.get",
+  "github.repos.getContent",
+  "github.git.getRef",
+  "github.git.getCommit",
+  "github.git.getTree",
+  "github.git.getBlob",
+  "github.repos.createOrUpdateFileContents",
+  "github.repos.deleteFile",
+  "github.git.createBlob",
+  "github.git.createTree",
+  "github.git.createCommit",
+  "github.git.updateRef",
+  "github.pulls.create",
+  "github.pulls.list",
+  "github.pulls.get",
+  "github.pulls.update",
+  "github.pulls.merge",
+  "github.pulls.listFiles",
+  "github.pulls.listCommits",
+  "github.issues.create",
+  "github.issues.list",
+] as const;
+
+function buildFullPermissions(): Record<string, Record<string, string>> {
+  const perms: Record<string, Record<string, string>> = {};
+  for (const name of ALL_ACTION_NAMES) {
+    perms[name] = {
+      owner: `^${E2E_OWNER}$`,
+      repo: `^${E2E_REPO}$`,
+    };
   }
-  if (typeof value === "string") {
-    return value;
-  }
+  return perms;
+}
+
+async function deleteRefIfExists(ref: string): Promise<void> {
+  log(`octokit -> DELETE ref ${ref}`);
   try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
+    await installationOctokit.request(
+      "DELETE /repos/{owner}/{repo}/git/refs/{ref}",
+      { owner: E2E_OWNER, repo: E2E_REPO, ref },
+    );
+    log(`octokit <- DELETE ref ${ref} ok`);
+  } catch (error: unknown) {
+    const status =
+      error && typeof error === "object" && "status" in error
+        ? (error as { status: number }).status
+        : 0;
+    log(`octokit <- DELETE ref ${ref} status=${status}`);
+    if (status !== 404 && status !== 422) {
+      throw error;
+    }
   }
 }
 
-async function getResponsePayload(
-  response: LoggedHttpResponse,
-): Promise<string> {
-  if (isFetchResponse(response)) {
-    return serializePayload(await response.clone().text());
-  }
-  if (response.text) {
-    return serializePayload(response.text);
-  }
-  return serializePayload(response.body);
-}
-
-async function assertStatus(
-  response: LoggedHttpResponse,
-  expected: number,
-  label: string,
-): Promise<void> {
-  if (response.status === expected) {
-    return;
-  }
-  const payload = await getResponsePayload(response);
-  assert.equal(
-    response.status,
-    expected,
-    `${label} failed with status ${response.status}. Payload: ${payload}`,
-  );
-}
-
-async function assertStatuses(
-  response: LoggedHttpResponse,
-  expected: number[],
-  label: string,
-): Promise<void> {
-  if (expected.includes(response.status)) {
-    return;
-  }
-  const payload = await getResponsePayload(response);
-  assert(
-    expected.includes(response.status),
-    `${label} failed with status ${response.status}. Expected one of ${expected.join(", ")}. Payload: ${payload}`,
-  );
-}
-
-function getExecuteData<T>(body: unknown): T {
-  return (body as ExecuteResponseBody<T>).data;
-}
+// -----------------------------------------------------------------------------
+// The test.
+// -----------------------------------------------------------------------------
 
 test(
   "GitRails end-to-end",
-  {
-    timeout: 180_000,
-  },
-  async () => {
-    const repo = TEST_GITHUB_REPO;
-    // Identify the authenticated GitHub user so the test can target the correct owner.
-    const githubUserResponse = await fetch(`${GITHUB_API_BASE_URL}/user`, {
-      method: "GET",
-      headers: GITHUB_API_HEADERS,
+  { timeout: 5 * 60_000 },
+  async (t) => {
+    log(`setup: runId=${runId} HEAD=${HEAD_BRANCH} BASE=${BASE_BRANCH}`);
+    log(`octokit -> getRef heads/${E2E_BASE_BRANCH}`);
+    const baseRef = await installationOctokit.rest.git.getRef({
+      owner: E2E_OWNER,
+      repo: E2E_REPO,
+      ref: `heads/${E2E_BASE_BRANCH}`,
     });
-    await assertStatus(githubUserResponse, 200, "githubUserResponse");
-    const githubUser =
-      (await githubUserResponse.json()) as RestEndpointMethodTypes["users"]["getAuthenticated"]["response"]["data"];
+    const baseBranchSha = baseRef.data.object.sha;
+    log(`octokit <- getRef sha=${baseBranchSha}`);
 
-    // Reuse the repo across runs; only create it the first time.
-    const existingRepoResponse = await fetch(
-      `${GITHUB_API_BASE_URL}/repos/${githubUser.login}/${repo}`,
-      {
-        method: "GET",
-        headers: GITHUB_API_HEADERS,
-      },
-    );
-    await assertStatuses(
-      existingRepoResponse,
-      [200, 404],
-      "existingRepoResponse",
-    );
-    if (existingRepoResponse.status === 404) {
-      await retryUntil(
-        async () => {
-          const createRepoResponse = await fetch(
-            `${GITHUB_API_BASE_URL}/user/repos`,
-            {
-              method: "POST",
-              headers: GITHUB_API_HEADERS,
-              body: JSON.stringify({
-                name: repo,
-                description: "Disposable repo for GitRails e2e tests.",
-                private: true,
-                auto_init: true,
-              }),
-            },
-          );
+    await deleteRefIfExists(`heads/${HEAD_BRANCH}`);
+    await deleteRefIfExists(`heads/${BASE_BRANCH}`);
 
-          return {
-            done: createRepoResponse.status === 201,
-            value: createRepoResponse,
-          };
-        },
-        {
-          attempts: 10,
-          delayMs: 1000,
-          getFailureMessage: async (response) =>
-            `Failed to create ${githubUser.login}/${repo}: ${await response.text()}`,
-        },
-      );
-    }
+    log(`octokit -> createRef refs/heads/${HEAD_BRANCH}`);
+    await installationOctokit.rest.git.createRef({
+      owner: E2E_OWNER,
+      repo: E2E_REPO,
+      ref: `refs/heads/${HEAD_BRANCH}`,
+      sha: baseBranchSha,
+    });
+    log(`octokit <- createRef refs/heads/${HEAD_BRANCH}`);
+    log(`octokit -> createRef refs/heads/${BASE_BRANCH}`);
+    await installationOctokit.rest.git.createRef({
+      owner: E2E_OWNER,
+      repo: E2E_REPO,
+      ref: `refs/heads/${BASE_BRANCH}`,
+      sha: baseBranchSha,
+    });
+    log(`octokit <- createRef refs/heads/${BASE_BRANCH}`);
 
-    // Reset the local sqlite files so the test controls the entire application state.
-    const databasePath = path.resolve(ROOT_DIR, TEST_DATABASE_PATH);
-    await fs.rm(databasePath, { force: true });
-    await fs.rm(`${databasePath}-shm`, { force: true });
-    await fs.rm(`${databasePath}-wal`, { force: true });
-
-    const { db } = await import("../src/db.js");
-
-    // Seed an existing principal key so the GitHub App callback can exercise recovery behavior.
-    const originalPrincipalKey = `pk_${crypto.randomBytes(32).toString("hex")}`;
-    db.prepare(
-      "INSERT INTO githubTargets (id, githubId, keyHash, githubLogin, createdAt) VALUES (?, ?, ?, ?, ?)",
-    ).run(
-      crypto.randomUUID(),
-      String(githubUser.id),
-      crypto.createHash("sha256").update(originalPrincipalKey).digest("hex"),
-      githubUser.login,
-      Date.now(),
-    );
-    const { app } = await import("../src/app.js");
+    // State shared between subtests.
+    let principalKey = "";
+    let primaryAgentKey = "";
+    let primaryAgentKeyId = "";
+    let pullNumber = 0;
+    let issueNumber = 0;
+    let headSha = "";
+    let fileBlobSha = "";
+    let fileCommitSha = "";
+    let fileTreeSha = "";
+    let createdBlobSha = "";
+    let createdTreeSha = "";
+    let createdCommitSha = "";
 
     try {
-      const owner = githubUser.login;
-      const runId = `${Date.now()}`;
-      const repoFilePath = `proxy-e2e-${runId}/content.txt`;
-      const branchName = `proxy-e2e-${runId}`;
-      const branchFilePath = `proxy-e2e-${runId}/branch.txt`;
-      const issueTitle = `proxy issue ${runId}`;
-      const pullTitle = `proxy pull ${runId}`;
+      // -----------------------------------------------------------------------
+      // Part 1 — HTTP route coverage (interleaves with Part 2 for chaining).
+      // -----------------------------------------------------------------------
 
-      // Validate the unhappy-path auth and authorization responses before doing any privileged work.
-      const missingInstallationIdResponse = await request(app).get(
-        "/githubTargets/github-app-callback",
-      );
-      await assertStatus(
-        missingInstallationIdResponse,
-        400,
-        "missingInstallationIdResponse",
-      );
-      assert.equal(
-        missingInstallationIdResponse.text,
-        "Missing installation_id parameter.",
-      );
-
-      const requestsWithoutAuth = await request(app).get("/requests");
-      await assertStatus(requestsWithoutAuth, 401, "requestsWithoutAuth");
-      assert.equal(
-        requestsWithoutAuth.body.error,
-        "Missing Authorization header.",
-      );
-
-      const invalidKeyRequests = await request(app)
-        .get("/requests")
-        .set("Authorization", "Bearer pk_invalid");
-      await assertStatus(invalidKeyRequests, 401, "invalidKeyRequests");
-      assert.equal(
-        invalidKeyRequests.body.error,
-        "Invalid principal key or agent key.",
-      );
-
-      // Resolve the repo's GitHub App installation so the setup callback can be exercised directly.
-      const { app: githubAppClient } = await import("../src/lib/octokit.js");
-      const ownerInstallationResponse = await githubAppClient.octokit.request(
-        "GET /repos/{owner}/{repo}/installation",
-        { owner, repo },
-      );
-      const ownerInstallation = ownerInstallationResponse.data;
-      const ownerInstallationAccount = ownerInstallation.account;
-      assert(
-        ownerInstallationAccount,
-        `Expected installation account for ${owner}.`,
-      );
-      assert.equal(
-        "login" in ownerInstallationAccount
-          ? ownerInstallationAccount.login
-          : ownerInstallationAccount.slug,
-        owner,
-      );
-
-      // Existing principals can create agent keys before a reinstall recovery flow rotates the principal key.
-      const revokedKeyResponse = await request(app)
-        .post("/agentKeys")
-        .set("Authorization", `Bearer ${originalPrincipalKey}`)
-        .send({
-          prefix: "e_recovery",
-        });
-      await assertStatus(revokedKeyResponse, 200, "revokedKeyResponse");
-      const revokedKeyBody = revokedKeyResponse.body as {
-        key: string;
-      };
-
-      // Reinstalling the GitHub App should rotate the principal key without revoking existing agent keys.
-      const bootstrapResponse = await request(app).get(
-        `/githubTargets/github-app-callback?installation_id=${ownerInstallation.id}`,
-      );
-      await assertStatus(bootstrapResponse, 200, "bootstrapResponse");
-      assert.match(bootstrapResponse.text, /GitHub App setup complete/);
-      assert.match(
-        bootstrapResponse.text,
-        /Existing principal key rotated\. Existing agent keys were preserved\./,
-      );
-      const principalKeyMatch = bootstrapResponse.text.match(
-        /<code>(pk_[a-f0-9]{64})<\/code>/,
-      );
-      assert(
-        principalKeyMatch,
-        `Expected principal key in HTML response. Received: ${bootstrapResponse.text}`,
-      );
-      const principalKey = principalKeyMatch[1];
-      assert.notEqual(principalKey, originalPrincipalKey);
-
-      const rotatedPrincipalRequests = await request(app)
-        .get("/requests/all")
-        .set("Authorization", `Bearer ${originalPrincipalKey}`);
-      await assertStatus(
-        rotatedPrincipalRequests,
-        401,
-        "rotatedPrincipalRequests",
-      );
-
-      const preservedAgentKeyAccess = await request(app)
-        .get("/agentKeys/current")
-        .set("Authorization", `Bearer ${revokedKeyBody.key}`);
-      await assertStatus(
-        preservedAgentKeyAccess,
-        200,
-        "preservedAgentKeyAccess",
-      );
-
-      // After rotation, existing agent keys remain, and principal keys cannot impersonate an agent key.
-      const initialKeysResponse = await request(app)
-        .get("/agentKeys")
-        .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(initialKeysResponse, 200, "initialKeysResponse");
-      const initialKeysBody = initialKeysResponse.body as Array<{ id: string }>;
-      assert.equal(initialKeysBody.length, 1);
-
-      const currentWithPrincipalKey = await request(app)
-        .get("/agentKeys/current")
-        .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(
-        currentWithPrincipalKey,
-        403,
-        "currentWithPrincipalKey",
-      );
-      assert.equal(
-        currentWithPrincipalKey.body.error,
-        "This endpoint requires an agent key, not a principal key.",
-      );
-
-      const principalKeyRequestsScope = await request(app)
-        .get("/requests")
-        .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(
-        principalKeyRequestsScope,
-        403,
-        "principalKeyRequestsScope",
-      );
-      assert.equal(
-        principalKeyRequestsScope.body.error,
-        "This endpoint requires an agent key, not a principal key.",
-      );
-
-      // Prefix validation keeps agent-key identifiers URL-safe and predictable.
-      const badPrefixResponse = await request(app)
-        .post("/agentKeys")
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          prefix: "Bad Prefix",
-        });
-      await assertStatus(badPrefixResponse, 400, "badPrefixResponse");
-
-      // Create the primary agent key that will drive the rest of the proxy exercise.
-      const createdKeyResponse = await request(app)
-        .post("/agentKeys")
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          prefix: "e_primary",
-        });
-      await assertStatus(createdKeyResponse, 200, "createdKeyResponse");
-      const createdKeyBody = createdKeyResponse.body as {
-        id: string;
-        prefix: string;
-        key: string;
-      };
-      assert.equal(createdKeyBody.prefix, "e_primary");
-      const primaryAgentKeyId = createdKeyBody.id;
-      const primaryAgentKey = createdKeyBody.key;
-
-      // Agent keys should not be able to administer other keys.
-      const listWithAgentKey = await request(app)
-        .get("/agentKeys")
-        .set("Authorization", `Bearer ${primaryAgentKey}`);
-      await assertStatus(listWithAgentKey, 403, "listWithAgentKey");
-
-      const currentWithAgentKey = await request(app)
-        .get("/agentKeys/current")
-        .set("Authorization", `Bearer ${primaryAgentKey}`);
-      await assertStatus(currentWithAgentKey, 200, "currentWithAgentKey");
-      const currentWithAgentKeyBody = currentWithAgentKey.body as {
-        id: string;
-        prefix: string;
-        permissions: Record<string, unknown>;
-      };
-      assert.equal(currentWithAgentKeyBody.id, primaryAgentKeyId);
-      assert.deepEqual(currentWithAgentKeyBody.permissions, {});
-
-      // Without permissions, the proxy should reject execution even with a valid agent key.
-      const executeWithoutPermission = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.get",
-          owner,
-          repo,
-        });
-      await assertStatus(
-        executeWithoutPermission,
-        403,
-        "executeWithoutPermission",
-      );
-
-      const invalidPermissionsResponse = await request(app)
-        .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          permissions: {
-            "github.fake.missing": {},
-          },
-        });
-      await assertStatus(
-        invalidPermissionsResponse,
-        400,
-        "invalidPermissionsResponse",
-      );
-
-      const scopedPermissions = {
-        "github.repos.getContent": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-          path: "^allowed/.*$",
-        },
-      };
-
-      // First prove that regex constraints are enforced before broadening permissions.
-      const scopedPermissionsResponse = await request(app)
-        .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          permissions: scopedPermissions,
-        });
-      await assertStatus(
-        scopedPermissionsResponse,
-        200,
-        "scopedPermissionsResponse",
-      );
-      assert.equal(scopedPermissionsResponse.body.ok, true);
-
-      const regexDeniedResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.getContent",
-          owner,
-          repo,
-          path: "README.md",
-        });
-      await assertStatus(regexDeniedResponse, 403, "regexDeniedResponse");
-      assert.match(regexDeniedResponse.body.error, /does not match constraint/);
-
-      // Then grant the full set of actions needed for the end-to-end GitHub workflow.
-      const allPermissions = {
-        "github.repos.get": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.repos.getContent": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.getRef": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.getCommit": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.getTree": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.getBlob": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.repos.createOrUpdateFileContents": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.repos.deleteFile": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.createBlob": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.createTree": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.createCommit": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.git.updateRef": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.create": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.list": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.get": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.update": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.merge": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.listFiles": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.pulls.listCommits": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.issues.create": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-        "github.issues.list": {
-          owner: `^${owner}$`,
-          repo: `^${repo}$`,
-        },
-      };
-
-      const fullPermissionsResponse = await request(app)
-        .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          permissions: allPermissions,
-        });
-      await assertStatus(
-        fullPermissionsResponse,
-        200,
-        "fullPermissionsResponse",
-      );
-      assert.equal(fullPermissionsResponse.body.ok, true);
-
-      // Exercise request validation separately from permission enforcement.
-      const missingActionResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({});
-      await assertStatus(missingActionResponse, 400, "missingActionResponse");
-
-      const unknownActionResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.unknown.action",
-        });
-      await assertStatus(unknownActionResponse, 400, "unknownActionResponse");
-
-      const validationFailureResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.get",
-          owner,
-        });
-      await assertStatus(
-        validationFailureResponse,
-        400,
-        "validationFailureResponse",
-      );
-      assert.equal(
-        validationFailureResponse.body.error,
-        "Request validation failed.",
-      );
-
-      const invalidStringifiedJsonResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.git.createTree",
-          owner,
-          repo,
-          stringifiedTree: "{not valid json}",
-        });
-      await assertStatus(
-        invalidStringifiedJsonResponse,
-        400,
-        "invalidStringifiedJsonResponse",
-      );
-      assert.equal(
-        invalidStringifiedJsonResponse.body.error,
-        'Invalid JSON for "stringifiedTree". Expected a JSON array string. Check the endpoint documentation for stringified params.',
-      );
-
-      // Principal keys are management credentials, not execution credentials.
-      const executeWithPrincipalKey = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          actionName: "github.repos.get",
-          owner,
-          repo,
-        });
-      await assertStatus(
-        executeWithPrincipalKey,
-        403,
-        "executeWithPrincipalKey",
-      );
-
-      const missingContentResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.getContent",
-          owner,
-          repo,
-          path: `missing-${runId}.txt`,
-        });
-      await assertStatus(missingContentResponse, 404, "missingContentResponse");
-      const missingContentBody =
-        missingContentResponse.body as ExecuteErrorBody;
-      assert.equal(missingContentBody.name, "HttpError");
-      assert.equal(missingContentBody.status, 404);
-      assert.equal(missingContentBody.response?.status, 404);
-      assert.equal(missingContentBody.response?.data?.message, "Not Found");
-
-      // Read the repo through the proxy and capture the default branch for later git operations.
-      const repoResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.get",
-          owner,
-          repo,
-        });
-      await assertStatus(repoResponse, 200, "repoResponse");
-      const repoEnvelope = repoResponse.body as ExecuteResponseBody<
-        RestEndpointMethodTypes["repos"]["get"]["response"]["data"]
-      >;
-      assert.equal(repoEnvelope.status, 200);
-      assert.equal(typeof repoEnvelope.url, "string");
-      assert.equal(typeof repoEnvelope.headers["content-type"], "string");
-      const repoBody = repoEnvelope.data;
-      assert.equal(repoBody.full_name, `${owner}/${repo}`);
-      const defaultBranch = repoBody.default_branch;
-      assert(
-        defaultBranch,
-        `Expected ${owner}/${repo} to have a default branch.`,
-      );
-
-      const readmeExistsResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/README.md`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
-        },
-      );
-      await assertStatuses(
-        readmeExistsResponse,
-        [200, 404],
-        "readmeExistsResponse",
-      );
-      if (readmeExistsResponse.status === 404) {
-        const createReadmeResponse = await fetch(
-          `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/${encodeURIComponent("README.md")}`,
-          {
-            method: "PUT",
-            headers: GITHUB_API_HEADERS,
-            body: JSON.stringify({
-              message: "initialize README for e2e tests",
-              content: Buffer.from(`# ${repo}\n`).toString("base64"),
-              branch: defaultBranch,
-            }),
-          },
+      await step(t, "GET /githubTargets/github-app-callback", async () => {
+        const res = await request(expressApp).get(
+          `/githubTargets/github-app-callback?installation_id=${E2E_INSTALLATION_ID}`,
         );
-        await assertStatus(createReadmeResponse, 201, "createReadmeResponse");
-      }
+        assert.equal(res.status, 200);
+        const match = res.text.match(/pk_[a-f0-9]{64}/);
+        assert(match, `Expected principal key in callback HTML: ${res.text}`);
+        principalKey = match[0];
+      });
 
-      // Walk the default branch objects through content/ref/commit/tree/blob endpoints.
-      const readmeResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.getContent",
-          owner,
-          repo,
-          path: "README.md",
+      await step(t, "POST /agentKeys", async () => {
+        const res = await bearer(principalKey)
+          .post("/agentKeys")
+          .send({ prefix: "e2e" });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.prefix, "e2e");
+        assert.ok(typeof res.body.id === "string");
+        assert.ok(typeof res.body.key === "string");
+        primaryAgentKey = res.body.key;
+        primaryAgentKeyId = res.body.id;
+        agentExecSuccess.set(primaryAgentKey, 0);
+      });
+
+      await step(t, "GET /agentKeys", async () => {
+        const res = await bearer(principalKey).get("/agentKeys");
+        assert.equal(res.status, 200);
+        const ids = (res.body as Array<{ id: string }>).map((r) => r.id);
+        assert.ok(ids.includes(primaryAgentKeyId));
+      });
+
+      await step(t, "PUT /agentKeys/:id/permissions (set all 21 to {})", async () => {
+        const permissions: Record<string, Record<string, string>> = {};
+        for (const name of ALL_ACTION_NAMES) {
+          permissions[name] = {};
+        }
+        const res = await bearer(principalKey)
+          .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
+          .send({ permissions });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.ok, true);
+      });
+
+      await step(t, "GET /agentKeys/current", async () => {
+        const res = await bearer(primaryAgentKey).get("/agentKeys/current");
+        assert.equal(res.status, 200);
+        assert.equal(res.body.id, primaryAgentKeyId);
+        const permissions = res.body.permissions as Record<string, unknown>;
+        assert.equal(
+          Object.keys(permissions).length,
+          ALL_ACTION_NAMES.length,
+        );
+        for (const name of ALL_ACTION_NAMES) {
+          assert.deepEqual(permissions[name], {});
+        }
+      });
+
+      await step(t, "GET /requests — empty before /execute", async () => {
+        const res = await bearer(primaryAgentKey).get("/requests");
+        assert.equal(res.status, 200);
+        assert.equal(res.body.total, 0);
+        assert.deepEqual(res.body.requests, []);
+      });
+
+      await step(t, "auth: missing Authorization on /requests → 401", async () => {
+        const res = await request(expressApp).get("/requests");
+        assert.equal(res.status, 401);
+      });
+
+      await step(t, "auth: agent key on /agentKeys (principal-only) → 403", async () => {
+        const res = await bearer(primaryAgentKey).get("/agentKeys");
+        assert.equal(res.status, 403);
+      });
+
+      await step(t, "auth: principal key on /execute → 403", async () => {
+        const res = await bearer(principalKey)
+          .post("/execute")
+          .send({
+            actionName: "github.repos.get",
+            owner: E2E_OWNER,
+            repo: E2E_REPO,
+          });
+        assert.equal(res.status, 403);
+      });
+
+      // Broaden the primary key's permissions so Part 2 can drive real actions.
+      await step(t, "PUT /agentKeys/:id/permissions (full allow)", async () => {
+        const res = await bearer(principalKey)
+          .put(`/agentKeys/${primaryAgentKeyId}/permissions`)
+          .send({ permissions: buildFullPermissions() });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.ok, true);
+      });
+
+      // -----------------------------------------------------------------------
+      // Part 2 — /execute proxied actions with effect verification.
+      // -----------------------------------------------------------------------
+
+      await step(t, "Part 2 step 1: repos.get", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.repos.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
         });
-      await assertStatus(readmeResponse, 200, "readmeResponse");
-      const readmeBody = getExecuteData<
-        Extract<
-          RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
-          { type: "file" }
-        >
-      >(readmeResponse.body);
-      assert.equal(readmeBody.path, "README.md");
+        assert.equal(res.status, 200);
+        assert.equal(
+          res.body.data.full_name,
+          `${E2E_OWNER}/${E2E_REPO}`,
+        );
+      });
 
-      const defaultRefResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 2: git.getRef heads/HEAD", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.git.getRef",
-          owner,
-          repo,
-          ref: `heads/${defaultBranch}`,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          ref: `heads/${HEAD_BRANCH}`,
         });
-      await assertStatus(defaultRefResponse, 200, "defaultRefResponse");
-      const defaultRefBody = getExecuteData<
-        RestEndpointMethodTypes["git"]["getRef"]["response"]["data"]
-      >(defaultRefResponse.body);
-      assert.equal(defaultRefBody.ref, `refs/heads/${defaultBranch}`);
+        assert.equal(res.status, 200);
+        assert.equal(res.body.data.ref, `refs/heads/${HEAD_BRANCH}`);
+        headSha = res.body.data.object.sha;
+        assert.equal(headSha, baseBranchSha);
+      });
 
-      const baseCommitResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.git.getCommit",
-          owner,
-          repo,
-          commit_sha: defaultRefBody.object.sha,
-        });
-      await assertStatus(baseCommitResponse, 200, "baseCommitResponse");
-      const baseCommitBody = getExecuteData<
-        RestEndpointMethodTypes["git"]["getCommit"]["response"]["data"]
-      >(baseCommitResponse.body);
-      assert.equal(baseCommitBody.sha, defaultRefBody.object.sha);
-
-      const baseTreeResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.git.getTree",
-          owner,
-          repo,
-          tree_sha: baseCommitBody.tree.sha,
-          recursive: "1",
-        });
-      await assertStatus(baseTreeResponse, 200, "baseTreeResponse");
-      const baseTreeBody = getExecuteData<
-        RestEndpointMethodTypes["git"]["getTree"]["response"]["data"]
-      >(baseTreeResponse.body);
-      const readmeBlob = baseTreeBody.tree.find(
-        (item) => item.path === "README.md",
-      );
-      assert(readmeBlob?.sha, "Expected README.md blob in the default tree.");
-
-      const blobResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.git.getBlob",
-          owner,
-          repo,
-          file_sha: readmeBlob.sha,
-        });
-      await assertStatus(blobResponse, 200, "blobResponse");
-      const blobBody = getExecuteData<{ sha: string; content: string }>(
-        blobResponse.body,
-      );
-      assert.equal(blobBody.sha, readmeBlob.sha);
-      assert.match(decodeGitHubContent(blobBody.content), /# /);
-
-      // Create a file through the proxy, then confirm the content directly from GitHub.
-      const createFileResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.createOrUpdateFileContents",
-          owner,
-          repo,
-          path: repoFilePath,
-          message: `create ${repoFilePath}`,
-          content: `proxy create ${runId}`,
-        });
-      await assertStatus(createFileResponse, 200, "createFileResponse");
-      const createFileBody = getExecuteData<{
-        content: {
-          sha: string;
-          path: string;
-        };
-      }>(createFileResponse.body);
-      assert.equal(createFileBody.content.path, repoFilePath);
-
-      const directCreatedFileResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/${repoFilePath}`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
+      await step(t, 
+        "Part 2 step 3: repos.createOrUpdateFileContents",
+        async () => {
+          const res = await exec(primaryAgentKey, {
+            actionName: "github.repos.createOrUpdateFileContents",
+            owner: E2E_OWNER,
+            repo: E2E_REPO,
+            path: FILE_PATH,
+            branch: HEAD_BRANCH,
+            message: `create ${FILE_PATH}`,
+            content: "v1",
+          });
+          assert.equal(res.status, 200);
+          assert.equal(res.body.data.content.path, FILE_PATH);
+          fileBlobSha = res.body.data.content.sha;
+          fileCommitSha = res.body.data.commit.sha;
+          fileTreeSha = res.body.data.commit.tree.sha;
         },
       );
-      await assertStatus(
-        directCreatedFileResponse,
-        200,
-        "directCreatedFileResponse",
-      );
-      const directCreatedFile =
-        (await directCreatedFileResponse.json()) as Extract<
-          RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
-          { type: "file" }
-        >;
-      assert.equal(
-        decodeGitHubContent(directCreatedFile.content),
-        `proxy create ${runId}`,
-      );
 
-      // Create a feature branch directly so later proxy git actions can build a commit on top of it.
-      const createRefResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/git/refs`,
-        {
-          method: "POST",
-          headers: GITHUB_API_HEADERS,
-          body: JSON.stringify({
-            ref: `refs/heads/${branchName}`,
-            sha: defaultRefBody.object.sha,
-          }),
-        },
-      );
-      await assertStatus(createRefResponse, 201, "createRefResponse");
+      await step(t, "Part 2 step 4: repos.getContent verifies v1", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.repos.getContent",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          path: FILE_PATH,
+          ref: HEAD_BRANCH,
+        });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.data.path, FILE_PATH);
+        assert.equal(res.body.data.sha, fileBlobSha);
+        assert.equal(decodeBase64Utf8(res.body.data.content), "v1");
+      });
 
-      // Build a commit manually through blob/tree/commit/update-ref to cover the lower-level git APIs.
-      const createdBlobResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 5: git.createBlob", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.git.createBlob",
-          owner,
-          repo,
-          content: `branch content ${runId}`,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          content: "hello",
           encoding: "utf-8",
         });
-      await assertStatus(createdBlobResponse, 200, "createdBlobResponse");
-      const createdBlobBody = getExecuteData<{ sha: string }>(
-        createdBlobResponse.body,
-      );
+        assert.equal(res.status, 200);
+        createdBlobSha = res.body.data.sha;
+        assert.ok(createdBlobSha);
+      });
 
-      const createdTreeResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 6: git.getBlob round-trip", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.git.getBlob",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          file_sha: createdBlobSha,
+        });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.data.sha, createdBlobSha);
+        assert.equal(decodeBase64Utf8(res.body.data.content), "hello");
+      });
+
+      await step(t, "Part 2 step 7: git.createTree", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.git.createTree",
-          owner,
-          repo,
-          base_tree: baseCommitBody.tree.sha,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          base_tree: fileTreeSha,
           stringifiedTree: JSON.stringify([
             {
-              path: branchFilePath,
+              path: EXTRA_FILE_PATH,
               mode: "100644",
               type: "blob",
-              sha: createdBlobBody.sha,
+              sha: createdBlobSha,
             },
           ]),
         });
-      await assertStatus(createdTreeResponse, 200, "createdTreeResponse");
-      const createdTreeBody = getExecuteData<{ sha: string }>(
-        createdTreeResponse.body,
-      );
+        assert.equal(res.status, 200);
+        createdTreeSha = res.body.data.sha;
+        assert.ok(createdTreeSha);
+      });
 
-      const createdCommitResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 8: git.getTree contains new entry", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.git.getTree",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          tree_sha: createdTreeSha,
+          recursive: "1",
+        });
+        assert.equal(res.status, 200);
+        const tree = res.body.data.tree as Array<{
+          path: string;
+          sha: string;
+        }>;
+        const match = tree.find((item) => item.path === EXTRA_FILE_PATH);
+        assert(match, `Expected ${EXTRA_FILE_PATH} in tree.`);
+        assert.equal(match.sha, createdBlobSha);
+      });
+
+      await step(t, "Part 2 step 9: git.createCommit", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.git.createCommit",
-          owner,
-          repo,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
           message: `commit ${runId}`,
-          tree: createdTreeBody.sha,
-          stringifiedParents: JSON.stringify([defaultRefBody.object.sha]),
-          stringifiedAuthor: JSON.stringify({
-            name: owner,
-            email: TEST_GITHUB_EMAIL,
-          }),
+          tree: createdTreeSha,
+          stringifiedParents: JSON.stringify([fileCommitSha]),
         });
-      await assertStatus(createdCommitResponse, 200, "createdCommitResponse");
-      const createdCommitBody = getExecuteData<{ sha: string }>(
-        createdCommitResponse.body,
-      );
+        assert.equal(res.status, 200);
+        createdCommitSha = res.body.data.sha;
+        assert.ok(createdCommitSha);
+      });
 
-      const updateRefResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 10: git.getCommit matches inputs", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.git.getCommit",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          commit_sha: createdCommitSha,
+        });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.data.sha, createdCommitSha);
+        assert.equal(res.body.data.tree.sha, createdTreeSha);
+        const parents = res.body.data.parents as Array<{ sha: string }>;
+        assert.deepEqual(
+          parents.map((p) => p.sha),
+          [fileCommitSha],
+        );
+      });
+
+      await step(t, "Part 2 step 11: git.updateRef HEAD", async () => {
+        const updateRes = await exec(primaryAgentKey, {
           actionName: "github.git.updateRef",
-          owner,
-          repo,
-          ref: `heads/${branchName}`,
-          sha: createdCommitBody.sha,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          ref: `heads/${HEAD_BRANCH}`,
+          sha: createdCommitSha,
         });
-      await assertStatus(updateRefResponse, 200, "updateRefResponse");
-      const updateRefBody = getExecuteData<
-        RestEndpointMethodTypes["git"]["updateRef"]["response"]["data"]
-      >(updateRefResponse.body);
-      assert.equal(updateRefBody.object.sha, createdCommitBody.sha);
+        assert.equal(updateRes.status, 200);
+        assert.equal(updateRes.body.data.object.sha, createdCommitSha);
 
-      // Confirm the branch file is visible from GitHub on the new branch.
-      const directBranchFileResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/${branchFilePath}?ref=${encodeURIComponent(branchName)}`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
-        },
-      );
-      await assertStatus(
-        directBranchFileResponse,
-        200,
-        "directBranchFileResponse",
-      );
-      const directBranchFile =
-        (await directBranchFileResponse.json()) as Extract<
-          RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
-          { type: "file" }
-        >;
-      assert.equal(
-        decodeGitHubContent(directBranchFile.content),
-        `branch content ${runId}`,
-      );
+        const verifyRes = await exec(primaryAgentKey, {
+          actionName: "github.git.getRef",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          ref: `heads/${HEAD_BRANCH}`,
+        });
+        assert.equal(verifyRes.status, 200);
+        assert.equal(verifyRes.body.data.object.sha, createdCommitSha);
+      });
 
-      // Drive the full pull request lifecycle through the proxy.
-      const createdPullResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 12: pulls.create", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.pulls.create",
-          owner,
-          repo,
-          title: pullTitle,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          title: `gitrails e2e ${runId}`,
           body: `body ${runId}`,
-          head: branchName,
-          base: defaultBranch,
+          head: HEAD_BRANCH,
+          base: BASE_BRANCH,
         });
-      await assertStatus(createdPullResponse, 200, "createdPullResponse");
-      const createdPullBody = getExecuteData<
-        RestEndpointMethodTypes["pulls"]["create"]["response"]["data"]
-      >(createdPullResponse.body);
-      const pullNumber = createdPullBody.number;
+        assert.equal(res.status, 200);
+        pullNumber = res.body.data.number;
+        assert.ok(pullNumber > 0);
+      });
 
-      const listPullsResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 13: pulls.get", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.pulls.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          pull_number: pullNumber,
+        });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.data.state, "open");
+        assert.equal(res.body.data.head.ref, HEAD_BRANCH);
+        assert.equal(res.body.data.base.ref, BASE_BRANCH);
+      });
+
+      await step(t, "Part 2 step 14: pulls.list contains pullNumber", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.pulls.list",
-          owner,
-          repo,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
           state: "open",
         });
-      await assertStatus(listPullsResponse, 200, "listPullsResponse");
-      const listPullsBody = getExecuteData<
-        RestEndpointMethodTypes["pulls"]["list"]["response"]["data"]
-      >(listPullsResponse.body);
-      assert(listPullsBody.some((pull) => pull.number === pullNumber));
+        assert.equal(res.status, 200);
+        const pulls = res.body.data as Array<{ number: number }>;
+        assert.ok(pulls.some((p) => p.number === pullNumber));
+      });
 
-      const getPullResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.pulls.get",
-          owner,
-          repo,
-          pull_number: pullNumber,
-        });
-      await assertStatus(getPullResponse, 200, "getPullResponse");
-      const getPullBody = getExecuteData<
-        RestEndpointMethodTypes["pulls"]["get"]["response"]["data"]
-      >(getPullResponse.body);
-      assert.equal(getPullBody.title, pullTitle);
-
-      const updatedPullResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.pulls.update",
-          owner,
-          repo,
-          pull_number: pullNumber,
-          title: `${pullTitle} updated`,
-          body: `updated ${runId}`,
-        });
-      await assertStatus(updatedPullResponse, 200, "updatedPullResponse");
-      const updatedPullBody = getExecuteData<
-        RestEndpointMethodTypes["pulls"]["update"]["response"]["data"]
-      >(updatedPullResponse.body);
-      assert.equal(updatedPullBody.title, `${pullTitle} updated`);
-
-      const pullFilesResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.pulls.listFiles",
-          owner,
-          repo,
-          pull_number: pullNumber,
-        });
-      await assertStatus(pullFilesResponse, 200, "pullFilesResponse");
-      const pullFilesBody = getExecuteData<Array<{ filename: string }>>(
-        pullFilesResponse.body,
-      );
-      assert(pullFilesBody.some((file) => file.filename === branchFilePath));
-
-      const pullCommitsResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 15: pulls.listCommits contains commit", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.pulls.listCommits",
-          owner,
-          repo,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
           pull_number: pullNumber,
         });
-      await assertStatus(pullCommitsResponse, 200, "pullCommitsResponse");
-      const pullCommitsBody = getExecuteData<Array<{ sha: string }>>(
-        pullCommitsResponse.body,
-      );
-      assert(
-        pullCommitsBody.some((commit) => commit.sha === createdCommitBody.sha),
-      );
+        assert.equal(res.status, 200);
+        const commits = res.body.data as Array<{ sha: string }>;
+        assert.ok(commits.some((c) => c.sha === createdCommitSha));
+      });
 
-      const mergePullResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+      await step(t, "Part 2 step 16: pulls.listFiles contains path", async () => {
+        const res = await exec(primaryAgentKey, {
+          actionName: "github.pulls.listFiles",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          pull_number: pullNumber,
+        });
+        assert.equal(res.status, 200);
+        const files = res.body.data as Array<{ filename: string }>;
+        const names = files.map((f) => f.filename);
+        assert.ok(names.includes(FILE_PATH));
+      });
+
+      await step(t, "Part 2 step 17: pulls.update new title", async () => {
+        const updateRes = await exec(primaryAgentKey, {
+          actionName: "github.pulls.update",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          pull_number: pullNumber,
+          title: `gitrails e2e ${runId} updated`,
+        });
+        assert.equal(updateRes.status, 200);
+
+        const verifyRes = await exec(primaryAgentKey, {
+          actionName: "github.pulls.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          pull_number: pullNumber,
+        });
+        assert.equal(verifyRes.status, 200);
+        assert.equal(verifyRes.body.data.title, `gitrails e2e ${runId} updated`);
+      });
+
+      await step(t, "Part 2 step 18: pulls.merge (squash)", async () => {
+        const mergeRes = await exec(primaryAgentKey, {
           actionName: "github.pulls.merge",
-          owner,
-          repo,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
           pull_number: pullNumber,
-          merge_method: "merge",
+          merge_method: "squash",
         });
-      await assertStatus(mergePullResponse, 200, "mergePullResponse");
-      const mergePullBody = getExecuteData<{
-        merged: boolean;
-        sha: string;
-      }>(mergePullResponse.body);
-      assert.equal(mergePullBody.merged, true);
+        assert.equal(mergeRes.status, 200);
+        assert.equal(mergeRes.body.data.merged, true);
 
-      // Verify the merge through GitHub rather than trusting the proxy response alone.
-      const mergedPullDirectResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/pulls/${pullNumber}`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
-        },
-      );
-      await assertStatus(
-        mergedPullDirectResponse,
-        200,
-        "mergedPullDirectResponse",
-      );
-      const mergedPullDirect =
-        (await mergedPullDirectResponse.json()) as RestEndpointMethodTypes["pulls"]["get"]["response"]["data"];
-      assert.ok(mergedPullDirect.merged_at);
+        const verifyRes = await exec(primaryAgentKey, {
+          actionName: "github.pulls.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          pull_number: pullNumber,
+        });
+        assert.equal(verifyRes.status, 200);
+        assert.equal(verifyRes.body.data.merged, true);
+        assert.equal(verifyRes.body.data.state, "closed");
+      });
 
-      const mergedBranchFileResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/${branchFilePath}`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
-        },
-      );
-      await assertStatus(
-        mergedBranchFileResponse,
-        200,
-        "mergedBranchFileResponse",
-      );
-      const mergedBranchFile =
-        (await mergedBranchFileResponse.json()) as Extract<
-          RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
-          { type: "file" }
-        >;
-      assert.equal(
-        decodeGitHubContent(mergedBranchFile.content),
-        `branch content ${runId}`,
-      );
+      await step(t, "Part 2 step 19: repos.deleteFile on BASE", async () => {
+        // The squash merge replays our file onto BASE but yields the same
+        // blob sha since the content is unchanged, so step 4's sha is valid.
+        const deleteRes = await exec(primaryAgentKey, {
+          actionName: "github.repos.deleteFile",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          path: FILE_PATH,
+          message: `delete ${FILE_PATH}`,
+          sha: fileBlobSha,
+          branch: BASE_BRANCH,
+        });
+        assert.equal(deleteRes.status, 200);
 
-      // Issue creation/listing is exercised separately from the PR flow.
-      const createdIssueResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
+        const verifyRes = await exec(primaryAgentKey, {
+          actionName: "github.repos.getContent",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          path: FILE_PATH,
+          ref: BASE_BRANCH,
+        });
+        assert.equal(verifyRes.status, 404);
+      });
+
+      await step(t, "Part 2 step 20: issues.create", async () => {
+        const res = await exec(primaryAgentKey, {
           actionName: "github.issues.create",
-          owner,
-          repo,
-          title: issueTitle,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+          title: ISSUE_TITLE,
           body: `issue body ${runId}`,
         });
-      await assertStatus(createdIssueResponse, 200, "createdIssueResponse");
-      const createdIssueBody = getExecuteData<
-        RestEndpointMethodTypes["issues"]["create"]["response"]["data"]
-      >(createdIssueResponse.body);
-      const issueNumber = createdIssueBody.number;
+        assert.equal(res.status, 200);
+        issueNumber = res.body.data.number;
+        assert.ok(issueNumber > 0);
+      });
 
-      const listIssuesBody = await retryUntil(
+      await step(t, "Part 2 step 21: issues.list contains issueNumber", async () => {
+        // GitHub's issues.listForRepo index is eventually consistent; a
+        // freshly created issue can take a few seconds to appear. Poll with
+        // short backoffs before failing.
+        const deadline = Date.now() + 15_000;
+        let lastCount = 0;
+        while (Date.now() < deadline) {
+          const res = await exec(primaryAgentKey, {
+            actionName: "github.issues.list",
+            owner: E2E_OWNER,
+            repo: E2E_REPO,
+            state: "open",
+            per_page: 100,
+          });
+          assert.equal(res.status, 200);
+          const issues = res.body.data as Array<{ number: number }>;
+          lastCount = issues.length;
+          if (issues.some((i) => i.number === issueNumber)) {
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        assert.fail(
+          `Issue #${issueNumber} not found after 15s polling; last list had ${lastCount} issues.`,
+        );
+      });
+
+      // -----------------------------------------------------------------------
+      // Back to Part 1 — /requests and /requests/all after Part 2.
+      // -----------------------------------------------------------------------
+
+      await step(t, "GET /requests (after Part 2)", async () => {
+        const res = await bearer(primaryAgentKey).get("/requests?limit=100");
+        assert.equal(res.status, 200);
+        assert.equal(
+          res.body.total,
+          agentExecSuccess.get(primaryAgentKey),
+        );
+      });
+
+      await step(t, "GET /requests/all (after Part 2)", async () => {
+        const res = await bearer(principalKey).get("/requests/all?limit=100");
+        assert.equal(res.status, 200);
+        assert.equal(res.body.total, principalExecSuccess);
+      });
+
+      // -----------------------------------------------------------------------
+      // Part 3 — /execute cross-cutting behavior. Each subtest uses a fresh
+      // key with scoped permissions so side-effects do not leak across cases.
+      // -----------------------------------------------------------------------
+
+      async function createScopedKey(
+        prefix: string,
+        permissions: Record<string, Record<string, string>>,
+      ): Promise<string> {
+        const createRes = await bearer(principalKey)
+          .post("/agentKeys")
+          .send({ prefix });
+        assert.equal(createRes.status, 200);
+        const { id, key } = createRes.body as { id: string; key: string };
+        const permRes = await bearer(principalKey)
+          .put(`/agentKeys/${id}/permissions`)
+          .send({ permissions });
+        assert.equal(permRes.status, 200);
+        agentExecSuccess.set(key, 0);
+        return key;
+      }
+
+      await step(t, "Part 3.1: unknown action → 400", async () => {
+        const key = await createScopedKey("p3_unknown", buildFullPermissions());
+        const res = await exec(key, { actionName: "github.nope" });
+        assert.equal(res.status, 400);
+      });
+
+      await step(t, "Part 3.2: schema failure → 400 with details", async () => {
+        const key = await createScopedKey("p3_schema", buildFullPermissions());
+        const res = await exec(key, {
+          actionName: "github.repos.get",
+          owner: E2E_OWNER,
+        });
+        assert.equal(res.status, 400);
+        assert.equal(res.body.error, "Request validation failed.");
+        assert.ok(Array.isArray(res.body.details));
+        assert.ok(res.body.details.length > 0);
+      });
+
+      await step(t, "Part 3.3: action not in perms → 403", async () => {
+        const key = await createScopedKey("p3_noperms", {});
+        const res = await exec(key, {
+          actionName: "github.repos.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+        });
+        assert.equal(res.status, 403);
+      });
+
+      await step(t, "Part 3.4: regex mismatch on required param → 403", async () => {
+        const key = await createScopedKey("p3_regex_required", {
+          "github.repos.get": { owner: "^otherorg$" },
+        });
+        const res = await exec(key, {
+          actionName: "github.repos.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+        });
+        assert.equal(res.status, 403);
+        assert.match(res.body.error, /does not match constraint/);
+      });
+
+      await step(t, 
+        "Part 3.5: regex fail-closed on omitted optional param → 403",
         async () => {
-          const listIssuesResponse = await request(app)
-            .post("/execute")
-            .set("Authorization", `Bearer ${primaryAgentKey}`)
-            .send({
-              actionName: "github.issues.list",
-              owner,
-              repo,
-              state: "open",
-            });
-          await assertStatus(listIssuesResponse, 200, "listIssuesResponse");
-          const body = getExecuteData<
-            RestEndpointMethodTypes["issues"]["listForRepo"]["response"]["data"]
-          >(listIssuesResponse.body);
-          return {
-            done: body.some((issue) => issue.number === issueNumber),
-            value: body,
-          };
-        },
-        {
-          attempts: 10,
-          delayMs: 1000,
-          getFailureMessage: (body) =>
-            `Timed out waiting for issue #${issueNumber} to appear in issues.list. Received issues: ${body
-              .map((issue) => issue.number)
-              .join(", ")}`,
+          const key = await createScopedKey("p3_regex_optional", {
+            "github.repos.getContent": { ref: "^main$" },
+          });
+          const res = await exec(key, {
+            actionName: "github.repos.getContent",
+            owner: E2E_OWNER,
+            repo: E2E_REPO,
+            path: "README.md",
+          });
+          assert.equal(res.status, 403);
+          assert.match(res.body.error, /required/i);
         },
       );
-      assert(listIssuesBody.some((issue) => issue.number === issueNumber));
 
-      const directIssueResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/issues/${issueNumber}`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
-        },
-      );
-      await assertStatus(directIssueResponse, 200, "directIssueResponse");
-      const directIssue =
-        (await directIssueResponse.json()) as RestEndpointMethodTypes["issues"]["get"]["response"]["data"];
-      assert.equal(directIssue.title, issueTitle);
-
-      // File deletion needs the latest blob sha, so fetch content first and then delete.
-      const contentBeforeDelete = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.getContent",
-          owner,
-          repo,
-          path: repoFilePath,
-        });
-      await assertStatus(contentBeforeDelete, 200, "contentBeforeDelete");
-
-      const contentBeforeDeleteBody = getExecuteData<
-        Extract<
-          RestEndpointMethodTypes["repos"]["getContent"]["response"]["data"],
-          { type: "file" }
-        >
-      >(contentBeforeDelete.body);
-
-      const deleteFileResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${primaryAgentKey}`)
-        .send({
-          actionName: "github.repos.deleteFile",
-          owner,
-          repo,
-          path: repoFilePath,
-          message: `delete ${repoFilePath}`,
-          sha: contentBeforeDeleteBody.sha,
-        });
-      await assertStatus(deleteFileResponse, 200, "deleteFileResponse");
-
-      // Confirm the deletion against GitHub directly.
-      const deletedFileResponse = await fetch(
-        `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/contents/${repoFilePath}`,
-        {
-          method: "GET",
-          headers: GITHUB_API_HEADERS,
-        },
-      );
-      await assertStatus(deletedFileResponse, 404, "deletedFileResponse");
-
-      // The principal key should see the broader request history for all agent activity.
-      const principalRequestsResponse = await request(app)
-        .get("/requests/all")
-        .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(
-        principalRequestsResponse,
-        200,
-        "principalRequestsResponse",
-      );
-      const principalRequestsBody = principalRequestsResponse.body as {
-        total: number;
-        requests: Array<{
-          agentKeyPrefix: string;
-          request: {
-            actionName?: string;
-          };
-        }>;
-      };
-      assert(
-        principalRequestsBody.requests.some(
-          (request) => request.request.actionName === "github.pulls.merge",
-        ),
-      );
-
-      // Create a second key to prove request history and permissions are scoped per agent key.
-      const secondKeyResponse = await request(app)
-        .post("/agentKeys")
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          prefix: "e_secondary",
-        });
-      await assertStatus(secondKeyResponse, 200, "secondKeyResponse");
-      const secondKeyBody = secondKeyResponse.body as {
-        id: string;
-        key: string;
-      };
-
-      const secondKeyPermissionsResponse = await request(app)
-        .put(`/agentKeys/${secondKeyBody.id}/permissions`)
-        .set("Authorization", `Bearer ${principalKey}`)
-        .send({
-          permissions: {
-            "github.repos.get": {
-              owner: `^${owner}$`,
-              repo: `^${repo}$`,
-            },
+      await step(t, "Part 3.6: request log on success decrypts to request body", async () => {
+        const key = await createScopedKey("p3_log_success", {
+          "github.repos.get": {
+            owner: `^${E2E_OWNER}$`,
+            repo: `^${E2E_REPO}$`,
           },
         });
-      await assertStatus(
-        secondKeyPermissionsResponse,
-        200,
-        "secondKeyPermissionsResponse",
-      );
-
-      const secondKeyExecuteResponse = await request(app)
-        .post("/execute")
-        .set("Authorization", `Bearer ${secondKeyBody.key}`)
-        .send({
+        const before = db
+          .prepare("SELECT COUNT(*) AS c FROM requests")
+          .get() as { c: number };
+        const res = await exec(key, {
           actionName: "github.repos.get",
-          owner,
-          repo,
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
         });
-      await assertStatus(
-        secondKeyExecuteResponse,
-        200,
-        "secondKeyExecuteResponse",
-      );
+        assert.equal(res.status, 200);
+        const after = db
+          .prepare("SELECT COUNT(*) AS c FROM requests")
+          .get() as { c: number };
+        assert.equal(after.c, before.c + 1);
+        const row = db
+          .prepare(
+            `SELECT r.encryptedRequest FROM requests r
+             JOIN agentKeys ak ON r.agentKeyId = ak.id
+             WHERE ak.keyHash = ?
+             ORDER BY r.createdAt DESC LIMIT 1`,
+          )
+          .get(crypto.createHash("sha256").update(key).digest("hex")) as {
+          encryptedRequest: string;
+        };
+        const decoded = JSON.parse(decrypt(row.encryptedRequest));
+        assert.deepEqual(decoded, {
+          actionName: "github.repos.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+        });
+      });
 
-      // The second key should only see its own single request.
-      const secondKeyRequestsResponse = await request(app)
-        .get("/requests")
-        .set("Authorization", `Bearer ${secondKeyBody.key}`);
-      await assertStatus(
-        secondKeyRequestsResponse,
-        200,
-        "secondKeyRequestsResponse",
-      );
-      const secondKeyRequestsBody = secondKeyRequestsResponse.body as {
-        total: number;
-        requests: Array<{
-          request: {
-            actionName?: string;
-          };
-        }>;
-      };
-      assert.equal(secondKeyRequestsBody.total, 1);
-      assert.equal(
-        secondKeyRequestsBody.requests[0]?.request.actionName,
-        "github.repos.get",
-      );
+      await step(t, "Part 3.7: no request log on permission denial", async () => {
+        const key = await createScopedKey("p3_log_denied", {
+          "github.repos.get": { owner: "^will-not-match$" },
+        });
+        const before = db
+          .prepare("SELECT COUNT(*) AS c FROM requests")
+          .get() as { c: number };
+        const res = await exec(key, {
+          actionName: "github.repos.get",
+          owner: E2E_OWNER,
+          repo: E2E_REPO,
+        });
+        assert.equal(res.status, 403);
+        const after = db
+          .prepare("SELECT COUNT(*) AS c FROM requests")
+          .get() as { c: number };
+        assert.equal(after.c, before.c);
+      });
 
-      const allRequestsWithAgentKey = await request(app)
-        .get("/requests/all")
-        .set("Authorization", `Bearer ${secondKeyBody.key}`);
-      await assertStatus(
-        allRequestsWithAgentKey,
-        403,
-        "allRequestsWithAgentKey",
-      );
-      assert.equal(
-        allRequestsWithAgentKey.body.error,
-        "This endpoint requires a principal key, not an agent key.",
-      );
+      // -----------------------------------------------------------------------
+      // DELETE /agentKeys/:id — runs last per the plan.
+      // -----------------------------------------------------------------------
 
-      const primaryKeyRequestsResponse = await request(app)
-        .get("/requests")
-        .set("Authorization", `Bearer ${primaryAgentKey}`);
-      await assertStatus(
-        primaryKeyRequestsResponse,
-        200,
-        "primaryKeyRequestsResponse",
-      );
-      const primaryKeyRequestsBody = primaryKeyRequestsResponse.body as {
-        total: number;
-      };
-      assert(primaryKeyRequestsBody.total > secondKeyRequestsBody.total);
+      await step(t, "DELETE /agentKeys/:id revokes access", async () => {
+        const createRes = await bearer(principalKey)
+          .post("/agentKeys")
+          .send({ prefix: "e2e_doomed" });
+        assert.equal(createRes.status, 200);
+        const { id: doomedId, key: doomedKey } = createRes.body as {
+          id: string;
+          key: string;
+        };
 
-      // Deletion should fail for unknown ids and revoke access for deleted keys.
-      const deleteMissingKeyResponse = await request(app)
-        .delete("/agentKeys/not-a-real-key")
-        .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(
-        deleteMissingKeyResponse,
-        404,
-        "deleteMissingKeyResponse",
-      );
+        const deleteRes = await bearer(principalKey).delete(
+          `/agentKeys/${doomedId}`,
+        );
+        assert.equal(deleteRes.status, 200);
 
-      const deleteSecondKeyResponse = await request(app)
-        .delete(`/agentKeys/${secondKeyBody.id}`)
-        .set("Authorization", `Bearer ${principalKey}`);
-      await assertStatus(
-        deleteSecondKeyResponse,
-        200,
-        "deleteSecondKeyResponse",
-      );
-      assert.equal(deleteSecondKeyResponse.body.ok, true);
+        const listRes = await bearer(principalKey).get("/agentKeys");
+        assert.equal(listRes.status, 200);
+        const ids = (listRes.body as Array<{ id: string }>).map((r) => r.id);
+        assert.ok(!ids.includes(doomedId));
 
-      const deletedSecondKeyAccess = await request(app)
-        .get("/agentKeys/current")
-        .set("Authorization", `Bearer ${secondKeyBody.key}`);
-      await assertStatus(deletedSecondKeyAccess, 401, "deletedSecondKeyAccess");
+        const probeRes = await bearer(doomedKey).get("/agentKeys/current");
+        assert.equal(probeRes.status, 401);
+      });
     } finally {
-      // Close the sqlite handle even if a mid-test assertion fails.
+      // Close the open issue and delete both branches. Ignore failures so a
+      // partial test still cleans up as much as possible.
+      if (issueNumber > 0) {
+        try {
+          await installationOctokit.rest.issues.update({
+            owner: E2E_OWNER,
+            repo: E2E_REPO,
+            issue_number: issueNumber,
+            state: "closed",
+          });
+        } catch {
+          // teardown is best-effort
+        }
+      }
+      try {
+        await deleteRefIfExists(`heads/${HEAD_BRANCH}`);
+      } catch {
+        // teardown is best-effort
+      }
+      try {
+        await deleteRefIfExists(`heads/${BASE_BRANCH}`);
+      } catch {
+        // teardown is best-effort
+      }
+
       db.close();
+      await fs.rm(TEMP_DB_PATH, { force: true });
+      await fs.rm(`${TEMP_DB_PATH}-shm`, { force: true });
+      await fs.rm(`${TEMP_DB_PATH}-wal`, { force: true });
     }
   },
 );

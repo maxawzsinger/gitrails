@@ -22,5 +22,6 @@ if (!hasPkcs8Markers && !hasRsaMarkers) {
   );
 }
 export const ENCRYPTION_KEY = required("ENCRYPTION_KEY");
+export const ENCRYPTION_SALT = required("ENCRYPTION_SALT");
 export const DATABASE_PATH = required("DATABASE_PATH");
 export const PORT = parseInt(required("PORT"), 10);
