@@ -13,6 +13,33 @@ The server recognises two user types:
 - **Principals** authenticate with principal keys and handle administration: provisioning agent keys and setting their permissions.
 - **Agents** authenticate with agent keys and make proxied GitHub API calls, with permissions enforced at call time.
 
+### How Permissions Work
+
+Each agent key is associated with a permissions object keyed by action name, with a regex per param:
+
+```json
+{
+  "github.repos.getContent": {
+    "owner": "^acme$",
+    "repo": "^monorepo$",
+    "path": "^(foo|foo/.*)$"
+  }
+}
+```
+
+Agents make requests that look like:
+
+```json
+{
+  "actionName": "github.repos.getContent",
+  "owner": "acme",
+  "repo": "monorepo",
+  "path": "foo/README.md"
+}
+```
+
+A call is allowed if and only if `actionName` is a top-level key in the permissions object and every configured regex matches its corresponding (stringified) request param. See the [Access Model](#access-model) section for full details.
+
 The server is hosted at `$BASE_URL = https://gitrails-production.up.railway.app`.
 
 > - GitHub calls are made using the installed GitHub App's installation token and inherit that token's scopes.
