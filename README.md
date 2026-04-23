@@ -12,7 +12,7 @@ For example, you can give an agent permission to read only certain subtrees of a
 
 It is built for agents that can make arbitrary network calls (probably by executing bash scripts). To interact with the server, the agent needs only to know of the server endpoints, and authenticate itself with an API key.
 
-The server is hosted at $BASE_URL. To use it, install the GitRails GitHub app to get your principal key. It is recommended to give key, and a link to this README.md, to a trusted agent to help you set up or provide clarifications.
+The server is hosted at $BASE_URL, which is `https://gitrails-production.up.railway.app`. To use it, install the GitRails GitHub app to get your principal key. It is recommended to give key, and a link to this README.md, to a trusted agent to help you set up or provide clarifications.
 
 Note: we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
 
@@ -33,6 +33,8 @@ Agents authenticate with an agent key and call the proxied GitHub API endpoints.
 `GET /agentKeys/current`
 Returns the authenticated agent key row, including its prefix and current permissions.
 
+Response: `{ id, githubTargetId, prefix, keyHash, permissions, createdAt }`. The plaintext agent key is never returned here; only the sha256 `keyHash` is.
+
 ```sh
 curl \
   -H "Authorization: Bearer $AGENT_KEY" \
@@ -44,7 +46,9 @@ Returns the request log for the authenticated agent key.
 
 Required params: none.
 
-Optional query params: `page`, `limit`.
+Optional query params: `page` (default 1), `limit` (default 50, capped at 100).
+
+Response: `{ page, limit, total, requests: [{ id, agentKeyPrefix, request, response, createdAt }] }`, newest first. `request` and `response` are the decrypted JSON payloads that were stored at execute time (truncated to a fixed size before storage).
 
 ```sh
 curl \
@@ -57,7 +61,7 @@ Executes one allowed proxied GitHub action using the authenticated agent key.
 
 Required body: one of the TypeScript shapes below.
 
-For `/execute`, successful GitHub calls return the full Octokit response object, and GitHub API failures return the full serialized Octokit error object with the upstream status code.
+For `/execute`, successful GitHub calls return the full Octokit response object (`{ status, url, headers, data }`) with HTTP 200. GitHub API failures return `{ name, message, status, response: { data } }` with the upstream status code; request/response headers are stripped to avoid leaking the installation token.
 
 If a field name starts with `stringified`, pass a JSON string, not a nested JSON value. Example: `stringifiedLabels: "[\"bug\",\"priority:high\"]"`. The proxy returns `400` if parsing that string does not produce valid JSON.
 
@@ -386,6 +390,8 @@ curl \
 `GET /agentKeys`
 Returns all agent keys.
 
+Response: an array of `{ id, prefix, permissions, createdAt }`, newest first. Plaintext keys and key hashes are not returned here; plaintext is only returned at creation time.
+
 ```sh
 curl \
   -H "Authorization: Bearer $PRINCIPAL_KEY" \
@@ -396,6 +402,8 @@ curl \
 Creates a new agent key with the given prefix and an empty permissions object.
 
 Required body: `{ "prefix": string }` where `prefix` uses lowercase letters and underscores only and becomes `gr_<prefix>_<secret>`.
+
+Response: `{ id, prefix, key }`, where `key` is the plaintext agent key. This is the only time the plaintext is returned; only its sha256 hash is persisted.
 
 ```sh
 curl \
@@ -413,6 +421,8 @@ Deletes the specified agent key.
 
 Required path params: `id` (agent key id).
 
+Response: `{ ok: true }` on success, or `404 { error }` if the id does not belong to the authenticated GitHub target.
+
 ```sh
 curl \
   -X DELETE \
@@ -426,6 +436,8 @@ Replaces the entire permissions policy for the specified agent key.
 Required path params: `id` (agent key id).
 
 Required body: `{ "permissions": ... }` as the full replacement permissions object.
+
+Response: `{ ok: true }` on success. Does not return the stored permissions; read them back via `GET /agentKeys` or `GET /agentKeys/current`.
 
 ```sh
 curl \
@@ -445,11 +457,13 @@ curl \
 ```
 
 `GET /requests/all`
-Returns the request log across all agent keys.
+Returns the request log across all agent keys owned by the authenticated GitHub target.
 
 Required params: none.
 
-Optional query params: `page`, `limit`.
+Optional query params: `page` (default 1), `limit` (default 50, capped at 100).
+
+Response: same shape as `GET /requests` — `{ page, limit, total, requests: [{ id, agentKeyPrefix, request, response, createdAt }] }`, newest first.
 
 ```sh
 curl \
@@ -469,7 +483,7 @@ Configure the GitHub App setup URL to point here.
 $BASE_URL/githubTargets/github-app-callback
 ```
 
-After the GitHub App setup flow completes, copy the returned principal key. You will use it to create and manage agent keys.
+The callback responds with an HTML page (not JSON) containing the newly issued principal key in a `<strong>` tag. Only the sha256 hash is persisted server-side, so this is the only time the plaintext principal key is shown. After the GitHub App setup flow completes, copy the returned principal key. You will use it to create and manage agent keys.
 
 If the app is later reinstalled on the same GitHub user or org, the setup flow rotates the existing principal key and preserves the existing agent keys associated with that target.
 
