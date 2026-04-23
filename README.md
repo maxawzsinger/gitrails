@@ -20,7 +20,7 @@ Note: All agents share the same underlying installation token rate-limit budget.
 
 ### User Types
 
-End users install the GitRails app on a personal or organisation account and receive a principal key.
+End users install the GitRails app https://github.com/apps/gitrails-ai on a personal or organisation account and receive a principal key.
 
 Note: the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
 

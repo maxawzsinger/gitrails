@@ -61,19 +61,11 @@ githubTargetsRouter.get("/github-app-callback", async (req, res) => {
 
     const githubId = String(githubAccount.id);
     const githubLogin = getGitHubAccountHandle(githubAccount);
-    const accountMessage = githubLogin
-      ? `GitHub App installation detected for ${githubLogin}.`
-      : "GitHub App installation detected.";
     const principalKeyPlaintext = `pk_${crypto.randomBytes(32).toString("hex")}`;
     const keyHash = sha256(principalKeyPlaintext);
     const existingGitHubTarget = db
       .prepare("SELECT id FROM githubTargets WHERE githubId = ?")
       .get(githubId) as { id: string } | undefined;
-
-    const didRotateExistingKey = existingGitHubTarget !== undefined;
-    const recoveryMessage = didRotateExistingKey
-      ? "Existing principal key rotated. Existing agent keys were preserved."
-      : "New principal key created.";
 
     if (existingGitHubTarget) {
       db.prepare("UPDATE githubTargets SET keyHash = ?, githubLogin = ? WHERE id = ?").run(
@@ -94,14 +86,17 @@ githubTargetsRouter.get("/github-app-callback", async (req, res) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GitHub App Setup Complete</title>
+    <title>GitRails GitHub App Setup Complete</title>
   </head>
   <body>
-    <h1>GitHub App setup complete</h1>
-    <p>${escapeHtml(accountMessage)}</p>
-    <p>${escapeHtml(recoveryMessage)}</p>
-    <p>This principal key is shown once. Store it somewhere safe.</p>
-    <pre><code>${escapeHtml(principalKeyPlaintext)}</code></pre>
+    <h1>GitRails GitHub App setup complete</h1>
+    <p>Paste the following into a trusted agent that can make network calls:</p>
+    <blockquote>
+      Please read the README.md at
+      <a href="https://github.com/maxawzsinger/gitrails/blob/main/README.md">https://github.com/maxawzsinger/gitrails/blob/main/README.md</a>
+      and help me set up the service. Your principal key is <strong>${escapeHtml(principalKeyPlaintext)}</strong>.
+    </blockquote>
+    <p>This key is shown once. Store it somewhere safe.</p>
   </body>
 </html>`);
   } catch (error: unknown) {
