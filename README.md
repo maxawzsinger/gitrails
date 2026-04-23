@@ -791,7 +791,7 @@ const paramIsAllowed = new RegExp(regex).test(paramValue);
 
 ##### Request Body
 
-Alice Agent calls `POST /execute` with this request body:
+Agent calls `POST /execute` with this request body:
 
 ```json
 {
@@ -817,7 +817,7 @@ Alice Agent calls `POST /execute` with this request body:
 
 ##### Request Body
 
-Alice Agent calls `POST /execute` with this request body:
+Agent calls `POST /execute` with this request body:
 
 ```json
 {
@@ -847,7 +847,7 @@ Alice Agent calls `POST /execute` with this request body:
 
 ##### Request Body
 
-Alice Agent calls `POST /execute` with this request body:
+Agent calls `POST /execute` with this request body:
 
 ```json
 {
@@ -875,7 +875,7 @@ Alice Agent calls `POST /execute` with this request body:
 
 ##### Request Body
 
-Alice Agent calls `POST /execute` with this request body:
+Agent calls `POST /execute` with this request body:
 
 ```json
 {
