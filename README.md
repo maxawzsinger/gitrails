@@ -23,7 +23,7 @@ The server is hosted at `$BASE_URL = https://gitrails-production.up.railway.app`
 
 Scenario: you have an untrusted agent and a repository `acme/monorepo` with some private information. You want give the agent read access to files under `foo/` and write access to files under `foo/bar/`.
 
-> **Note:**The recommended pattern is to hand your principal key and a link to this README to a trusted agent and have the agent do the work. Each step below shows a sample message you can send to the agent, followed by the underlying calls the agent will make.
+> **Note:** The recommended pattern is to hand your principal key and a link to this README to a trusted agent and have the agent do the work. Each step below shows a sample message you can send to the agent, followed by the underlying calls the agent will make.
 
 ### 1. Install the GitHub App
 
@@ -41,8 +41,6 @@ Install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) on your p
 > - write access to `foo/bar/` in `acme/monorepo`
 >
 > Return the plaintext agent key.
-
-> **Note**You can set whatever prefix you like on agent keys to help you remember which agent they are intended for
 
 The agent will run something like:
 
@@ -116,7 +114,7 @@ curl \
   }'
 ```
 
-### 4. Inspect request history
+### 4. Optionally, inspect request history
 
 > **Message to agent (agent's own history):**
 >
