@@ -4,6 +4,123 @@
 
 # GitRails
 
+## Quickstart
+
+This example gives an agent read access to `foo/` and write access to `foo/bar/` in `acme/monorepo`.
+
+The recommended pattern is to hand your principal key and a link to this README to a trusted agent and have the agent do the work. Each step below shows a sample message you can send to the agent, followed by the underlying calls the agent will make.
+
+### 1. Install the GitHub App
+
+Install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) on your personal or organisation account. The install callback returns an HTML page containing your newly-issued principal key in a `<strong>` tag. Copy it — only the sha256 hash is persisted, so this is the only time the plaintext principal key is shown.
+
+> **Note:** If the app is later reinstalled on the same GitHub user or org, the setup flow rotates the principal key and preserves the existing agent keys.
+
+### 2. Ask an agent to provision an agent key
+
+> **Message to agent:**
+>
+> You are acting as a principal for GitRails (docs: `$README_URL`). My principal key is `$PRINCIPAL_KEY`. Please create an agent key with prefix `docs_agent` and set its permissions to allow:
+>
+> - read access to `foo/` in `acme/monorepo`
+> - write access to `foo/bar/` in `acme/monorepo`
+>
+> Return the plaintext agent key.
+
+The agent will run something like:
+
+```sh
+curl \
+  -X POST \
+  -H "Authorization: Bearer $PRINCIPAL_KEY" \
+  -H "Content-Type: application/json" \
+  "$BASE_URL/agentKeys" \
+  -d '{ "prefix": "docs_agent" }'
+
+curl \
+  -X PUT \
+  -H "Authorization: Bearer $PRINCIPAL_KEY" \
+  -H "Content-Type: application/json" \
+  "$BASE_URL/agentKeys/<agent-key-id>/permissions" \
+  -d '{
+    "permissions": {
+      "github.repos.getContent": {
+        "owner": "^acme$",
+        "repo": "^monorepo$",
+        "path": "^(foo|foo/.*)$"
+      },
+      "github.repos.createOrUpdateFileContents": {
+        "owner": "^acme$",
+        "repo": "^monorepo$",
+        "path": "^(foo/bar|foo/bar/.*)$"
+      },
+      "github.repos.deleteFile": {
+        "owner": "^acme$",
+        "repo": "^monorepo$",
+        "path": "^(foo/bar|foo/bar/.*)$"
+      }
+    }
+  }'
+```
+
+### 3. Ask an agent to use the agent key to do work
+
+> **Message to agent:**
+>
+> You are an agent using GitRails (docs: `$README_URL`). Your agent key is `$AGENT_KEY`. Please read `foo/README.md` from `acme/monorepo`, then create `foo/bar/hello.txt` with contents `"hello from the proxy"`.
+
+The agent will run something like:
+
+```sh
+curl \
+  -X POST \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "Content-Type: application/json" \
+  "$BASE_URL/execute" \
+  -d '{
+    "actionName": "github.repos.getContent",
+    "owner": "acme",
+    "repo": "monorepo",
+    "path": "foo/README.md"
+  }'
+
+curl \
+  -X POST \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  -H "Content-Type: application/json" \
+  "$BASE_URL/execute" \
+  -d '{
+    "actionName": "github.repos.createOrUpdateFileContents",
+    "owner": "acme",
+    "repo": "monorepo",
+    "path": "foo/bar/hello.txt",
+    "message": "create foo/bar/hello.txt",
+    "content": "hello from the proxy"
+  }'
+```
+
+### 4. Inspect request history
+
+> **Message to agent (agent's own history):**
+>
+> You are an agent with GitRails agent key `$AGENT_KEY`. Show me my request history.
+
+> **Message to agent (all agents' history):**
+>
+> You are acting as a principal for GitRails. My principal key is `$PRINCIPAL_KEY`. Show me the request history across all of my agent keys.
+
+The agent will run:
+
+```sh
+curl \
+  -H "Authorization: Bearer $AGENT_KEY" \
+  "$BASE_URL/requests"
+
+curl \
+  -H "Authorization: Bearer $PRINCIPAL_KEY" \
+  "$BASE_URL/requests/all"
+```
+
 ## About
 
 This server exists to let humans grant unlimited AI agents very finely scoped access to a subset of the GitHub API.
@@ -12,23 +129,23 @@ For example, you can give an agent permission to read only certain subtrees of a
 
 It is built for agents that can make arbitrary network calls (probably by executing bash scripts). To interact with the server, the agent needs only to know of the server endpoints, and authenticate itself with an API key.
 
-The server is hosted at $BASE_URL, which is `https://gitrails-production.up.railway.app`. To use it, install the GitRails GitHub app to get your principal key. It is recommended to give key, and a link to this README.md, to a trusted agent to help you set up or provide clarifications.
+The server is hosted at $BASE_URL, which is `https://gitrails-production.up.railway.app`. To use it, install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) to get your principal key. It is recommended to give key, and a link to this README.md, to a trusted agent to help you set up or provide clarifications.
 
-Note: we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
+> **Note:** we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
 
-Note: All agents share the same underlying installation token rate-limit budget.
+> **Note:** All agents share the same underlying installation token rate-limit budget.
 
 ### User Types
 
-End users install the GitRails app https://github.com/apps/gitrails-ai on a personal or organisation account and receive a principal key.
+End users install the GitRails app on a personal or organisation account and receive a principal key.
 
-Note: the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
+> **Note:** the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
 
 Principals authenticate with a principal key and handle administrative tasks, including provisioning and managing agent keys.
 
 Agents authenticate with an agent key and call the proxied GitHub API endpoints. Each agent key is associated with its own permissions object that controls which GitHub API endpoints it can call and the parameters it can pass when calling.
 
-### Agent Key Endpoints
+## Agent Key Endpoints
 
 `GET /agentKeys/current`
 Returns the authenticated agent key row, including its prefix and current permissions.
@@ -63,7 +180,7 @@ Required body: one of the TypeScript shapes below.
 
 For `/execute`, successful GitHub calls return the full Octokit response object (`{ status, url, headers, data }`) with HTTP 200. GitHub API failures return `{ name, message, status, response: { data } }` with the upstream status code; request/response headers are stripped to avoid leaking the installation token.
 
-If a field name starts with `stringified`, pass a JSON string, not a nested JSON value. Example: `stringifiedLabels: "[\"bug\",\"priority:high\"]"`. The proxy returns `400` if parsing that string does not produce valid JSON.
+> **Note:** If a field name starts with `stringified`, pass a JSON string, not a nested JSON value. Example: `stringifiedLabels: "[\"bug\",\"priority:high\"]"`. The proxy returns `400` if parsing that string does not produce valid JSON.
 
 #### Repository Actions
 
@@ -385,7 +502,7 @@ curl \
   }'
 ```
 
-### Principal Key Endpoints
+## Principal Key Endpoints
 
 `GET /agentKeys`
 Returns all agent keys.
@@ -469,131 +586,6 @@ Response: same shape as `GET /requests` — `{ page, limit, total, requests: [{ 
 curl \
   -H "Authorization: Bearer $PRINCIPAL_KEY" \
   "$BASE_URL/requests/all?page=1&limit=50"
-```
-
-## Quickstart
-
-This example gives an agent read access to `foo/` and write access to `foo/bar/` only.
-
-### 1. Install the GitHub App and receive a principal key
-
-Configure the GitHub App setup URL to point here.
-
-```text
-$BASE_URL/githubTargets/github-app-callback
-```
-
-The callback responds with an HTML page (not JSON) containing the newly issued principal key in a `<strong>` tag. Only the sha256 hash is persisted server-side, so this is the only time the plaintext principal key is shown. After the GitHub App setup flow completes, copy the returned principal key. You will use it to create and manage agent keys.
-
-If the app is later reinstalled on the same GitHub user or org, the setup flow rotates the existing principal key and preserves the existing agent keys associated with that target.
-
-### 2. Create an agent key
-
-```sh
-curl \
-  -X POST \
-  -H "Authorization: Bearer $PRINCIPAL_KEY" \
-  -H "Content-Type: application/json" \
-  "$BASE_URL/agentKeys" \
-  -d '{
-    "prefix": "docs_agent"
-  }'
-```
-
-Save the returned agent key. This is the credential the agent will use when calling `POST /execute`.
-
-### 3. Set permissions on the new agent key
-
-This example grants the following permissions:
-
-- read access to `foo/`
-- write access to `foo/bar/`
-
-```sh
-curl \
-  -X PUT \
-  -H "Authorization: Bearer $PRINCIPAL_KEY" \
-  -H "Content-Type: application/json" \
-  "$BASE_URL/agentKeys/<agent-key-id>/permissions" \
-  -d '{
-    "permissions": {
-      "github.repos.getContent": {
-        "owner": "^acme$",
-        "repo": "^monorepo$",
-        "path": "^(foo|foo/.*)$"
-      },
-      "github.repos.createOrUpdateFileContents": {
-        "owner": "^acme$",
-        "repo": "^monorepo$",
-        "path": "^(foo/bar|foo/bar/.*)$"
-      },
-      "github.repos.deleteFile": {
-        "owner": "^acme$",
-        "repo": "^monorepo$",
-        "path": "^(foo/bar|foo/bar/.*)$"
-      }
-    }
-  }'
-```
-
-### 4. Read from the allowed subtree with the agent key
-
-This succeeds because `foo/README.md` is inside the allowed read subtree.
-
-```sh
-curl \
-  -X POST \
-  -H "Authorization: Bearer $AGENT_KEY" \
-  -H "Content-Type: application/json" \
-  "$BASE_URL/execute" \
-  -d '{
-    "actionName": "github.repos.getContent",
-    "owner": "acme",
-    "repo": "monorepo",
-    "path": "foo/README.md"
-  }'
-```
-
-### 5. Write inside the nested allowed subtree with the agent key
-
-This succeeds because `foo/bar/hello.txt` is inside the allowed write subtree.
-
-```sh
-curl \
-  -X POST \
-  -H "Authorization: Bearer $AGENT_KEY" \
-  -H "Content-Type: application/json" \
-  "$BASE_URL/execute" \
-  -d '{
-    "actionName": "github.repos.createOrUpdateFileContents",
-    "owner": "acme",
-    "repo": "monorepo",
-    "path": "foo/bar/hello.txt",
-    "message": "create foo/bar/hello.txt",
-    "content": "hello from the proxy"
-  }'
-```
-
-### 6. Inspect request history
-
-#### Agent Key Request History
-
-Use an agent key to inspect only that agent's own request history.
-
-```sh
-curl \
-  -H "Authorization: Bearer $AGENT_KEY" \
-  "$BASE_URL/requests"
-```
-
-#### Principal Key Request History
-
-Use a principal key to inspect all requests made by child agents.
-
-```sh
-curl \
-  -H "Authorization: Bearer $PRINCIPAL_KEY" \
-  "$BASE_URL/requests/all"
 ```
 
 ## Permissions
@@ -780,7 +772,13 @@ type Perms = {
 
 ### Access Model
 
-When an agent calls `/execute`, the proxy loads the permissions for that agent key. The request is allowed only if the action exists as a top-level permission key, and any regex specified for parameters match the corresponding parameter values in the request body provided by the agent (non-string parameters are cast to string before testing). Permission matching is fail-closed for omitted params: if a constrained param is required by the action schema and the request omits it, request validation fails before permission matching; if a constrained param is optional and the request omits it, the proxy still runs the regex against `""` (empty string), not `"undefined"`, and does not skip the check.
+When an agent calls `/execute`, the proxy loads the permissions for that agent key and enforces the following rules:
+
+- The action must exist as a top-level permission key.
+- Any regex specified for a parameter must match the corresponding value in the request body. Non-string parameters are cast to string before testing.
+- Permission matching is fail-closed for omitted params:
+  - If a constrained param is required by the action schema and the request omits it, request validation fails before permission matching.
+  - If a constrained param is optional and the request omits it, the proxy still runs the regex against `""` (empty string), not `"undefined"`, and does not skip the check.
 
 How the proxy does regex checks:
 
@@ -814,7 +812,7 @@ Alice Agent calls `POST /execute` with this request body:
 }
 ```
 
-Behavior: allowed. The action exists in the permissions object, and there are no param regex checks for this action.
+**Behavior:** allowed. The action exists in the permissions object, and there are no param regex checks for this action.
 
 #### 2. Action Is Missing
 
@@ -841,7 +839,7 @@ Alice Agent calls `POST /execute` with this request body:
 }
 ```
 
-Behavior: rejected with `403`. `github.repos.deleteFile` is not a top-level permission key.
+**Behavior:** rejected with `403`. `github.repos.deleteFile` is not a top-level permission key.
 
 #### 3. Action Is Present and Constrained Params Match
 
@@ -869,7 +867,7 @@ Alice Agent calls `POST /execute` with this request body:
 }
 ```
 
-Behavior: allowed. The proxy stringifies `owner` and `repo`, and both values match their configured regex.
+**Behavior:** allowed. The proxy stringifies `owner` and `repo`, and both values match their configured regex.
 
 #### 4. Action Is Present but a Constrained Param Does Not Match
 
@@ -897,6 +895,6 @@ Alice Agent calls `POST /execute` with this request body:
 }
 ```
 
-Behavior: rejected with `403`. The stringified `owner` value `other-org` does not match `^acme$`.
+**Behavior:** rejected with `403`. The stringified `owner` value `other-org` does not match `^acme$`.
 
 Remember, only the principal can modify the permissions object for an agent.
