@@ -4,19 +4,34 @@
 
 # GitRails
 
+## About
+
+GitRails lets humans grant AI agents finely scoped access to the GitHub API — controlling both which endpoints agents can hit and the parameters they may pass. Access is over HTTP, so any agent capable of issuing network calls can use it.
+
+The server recognises two user types:
+
+- **Principals** authenticate with principal keys and handle administration: provisioning agent keys and setting their permissions.
+- **Agents** authenticate with agent keys and make proxied GitHub API calls, with permissions enforced at call time.
+
+The server is hosted at `$BASE_URL = https://gitrails-production.up.railway.app`.
+
+> - GitHub calls are made using the installed GitHub App's installation token and inherit that token's scopes.
+> - All agents share the same installation-token rate-limit budget.
+> - 21 GitHub API endpoints are currently supported, chosen for agents acting as "individual contributors".
+
 ## Quickstart
 
-This example gives an agent read access to `foo/` and write access to `foo/bar/` in `acme/monorepo`.
+Scenario: you have an untrusted agent and a repository `acme/monorepo` with some private information. You want give the agent read access to files under `foo/` and write access to files under `foo/bar/`.
 
-The recommended pattern is to hand your principal key and a link to this README to a trusted agent and have the agent do the work. Each step below shows a sample message you can send to the agent, followed by the underlying calls the agent will make.
+> **Note:**The recommended pattern is to hand your principal key and a link to this README to a trusted agent and have the agent do the work. Each step below shows a sample message you can send to the agent, followed by the underlying calls the agent will make.
 
 ### 1. Install the GitHub App
 
-Install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) on your personal or organisation account. The install callback returns an HTML page containing your newly-issued principal key in a `<strong>` tag. Copy it — only the sha256 hash is persisted, so this is the only time the plaintext principal key is shown.
+Install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) on your personal or organisation account. Note the generated principal key.
 
 > **Note:** If the app is later reinstalled on the same GitHub user or org, the setup flow rotates the principal key and preserves the existing agent keys.
 
-### 2. Ask an agent to provision an agent key
+### 2. Ask a trusted agent to provision an agent key
 
 > **Message to agent:**
 >
@@ -26,6 +41,8 @@ Install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) on your p
 > - write access to `foo/bar/` in `acme/monorepo`
 >
 > Return the plaintext agent key.
+
+> **Note**You can set whatever prefix you like on agent keys to help you remember which agent they are intended for
 
 The agent will run something like:
 
@@ -63,7 +80,7 @@ curl \
   }'
 ```
 
-### 3. Ask an agent to use the agent key to do work
+### 3. Ask the untrusted agent to use the agent key to do work
 
 > **Message to agent:**
 >
@@ -120,30 +137,6 @@ curl \
   -H "Authorization: Bearer $PRINCIPAL_KEY" \
   "$BASE_URL/requests/all"
 ```
-
-## About
-
-This server exists to let humans grant unlimited AI agents very finely scoped access to a subset of the GitHub API.
-
-For example, you can give an agent permission to read only certain subtrees of a repository, and another agent permission to open issues in certain repositories only.
-
-It is built for agents that can make arbitrary network calls (probably by executing bash scripts). To interact with the server, the agent needs only to know of the server endpoints, and authenticate itself with an API key.
-
-The server is hosted at $BASE_URL, which is `https://gitrails-production.up.railway.app`. To use it, install the [GitRails GitHub app](https://github.com/apps/gitrails-ai) to get your principal key. It is recommended to give key, and a link to this README.md, to a trusted agent to help you set up or provide clarifications.
-
-> **Note:** we currently support 21 GitHub API endpoints deemed useful for agents acting as "individual contributors".
-
-> **Note:** All agents share the same underlying installation token rate-limit budget.
-
-### User Types
-
-End users install the GitRails app on a personal or organisation account and receive a principal key.
-
-> **Note:** the server performs GitHub calls using the installed GitHub App's installation token, using that token's scopes.
-
-Principals authenticate with a principal key and handle administrative tasks, including provisioning and managing agent keys.
-
-Agents authenticate with an agent key and call the proxied GitHub API endpoints. Each agent key is associated with its own permissions object that controls which GitHub API endpoints it can call and the parameters it can pass when calling.
 
 ## Agent Key Endpoints
 
