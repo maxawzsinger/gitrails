@@ -6,7 +6,7 @@
 
 ## About
 
-GitRails lets humans grant AI agents finely scoped access to the GitHub API — controlling both which endpoints agents can hit and the parameters they may pass. Access is over HTTP, so any agent capable of issuing network calls can use it.
+GitRails lets humans grant AI agents finely scoped access to the GitHub API - controlling both which endpoints agents can hit and the parameters they may pass. Access is over HTTP, so any agent capable of issuing network calls can use it.
 
 The server recognises two user types:
 
@@ -598,7 +598,7 @@ Required params: none.
 
 Optional query params: `page` (default 1), `limit` (default 50, capped at 100).
 
-Response: same shape as `GET /requests` — `{ page, limit, total, requests: [{ id, agentKeyPrefix, request, response, createdAt }] }`, newest first.
+Response: same shape as `GET /requests` - `{ page, limit, total, requests: [{ id, agentKeyPrefix, request, response, createdAt }] }`, newest first.
 
 ```sh
 curl \
@@ -916,3 +916,7 @@ Agent calls `POST /execute` with this request body:
 **Behavior:** rejected with `403`. The stringified `owner` value `other-org` does not match `^acme$`.
 
 Remember, only the principal can modify the permissions object for an agent.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
