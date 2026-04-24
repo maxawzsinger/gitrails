@@ -8,6 +8,9 @@
 
 GitRails lets humans grant AI agents finely scoped access to the GitHub API - controlling both which endpoints agents can hit and the parameters they may pass. Access is over HTTP, so any agent capable of issuing network calls can use it.
 
+> [!NOTE]
+> **Use case:** S keeps his Obsidian vault in GitHub and wants to share a few folders with his OpenClaw instance. Since the notes are already there, the obvious move is to give it API access to the repo. But he does not fully trust OpenClaw and does not want to expose the entire repository, so he uses GitRails to ensure it can read only specific sections.
+
 The server recognises two user types:
 
 - **Principals** authenticate with principal keys and handle administration: provisioning agent keys and setting their permissions.
